@@ -26,6 +26,15 @@ class Position:
     initial_R: float = 0.0  # Initial risk distance (entry to initial stop) for SQUEEZE
     tp1_price: float = 0.0  # TP1 target price for SQUEEZE (0.0 = disabled)
     exit_on_last_bar: bool = False  # For ORACLE Buy & Hold: exit at last bar
+    # ── DeceptionLeaderBot exit lattice (added for deception_mode) ──────────
+    tp2_price: float = 0.0  # TP2 target price for the remainder (0 = disabled)
+    tp1_frac: float = 1.0  # Fraction of position closed at TP1 (1.0 = full close)
+    tsl_bps: float = 0.0  # Trailing stop callback in bps (0 = no TSL)
+    tsl_active: bool = False  # Whether TSL is currently active on the remainder
+    tsl_extreme: float = 0.0  # Favourable extreme tracked since TSL activation
+    tp1_hit: bool = False  # Whether TP1 has already fired (partial close)
+    deception_score: float = 0.0  # Bot signal deception_score (for reporting)
+    trap_type: str = ""  # Bot signal trap_type (for reporting)
 
 
 class PortfolioState:
@@ -61,13 +70,19 @@ class PortfolioState:
         slippage: float = 0.0,
         entry_idx: int = -1,
         position_id: str = None,
-        exit_on_last_bar: bool = False
+        exit_on_last_bar: bool = False,
+        tp1_price: float = 0.0,
+        tp2_price: float = 0.0,
+        tp1_frac: float = 1.0,
+        tsl_bps: float = 0.0,
+        deception_score: float = 0.0,
+        trap_type: str = "",
     ):
         """Add new position"""
         import uuid
         if position_id is None:
             position_id = str(uuid.uuid4())
-        
+
         position = Position(
             symbol=symbol,
             qty=qty,
@@ -79,7 +94,13 @@ class PortfolioState:
             module=module,
             side=side,
             position_id=position_id,
-            exit_on_last_bar=exit_on_last_bar
+            exit_on_last_bar=exit_on_last_bar,
+            tp1_price=tp1_price,
+            tp2_price=tp2_price,
+            tp1_frac=tp1_frac,
+            tsl_bps=tsl_bps,
+            deception_score=deception_score,
+            trap_type=trap_type,
         )
         
         # Validate: no duplicate positions per symbol

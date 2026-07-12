@@ -17,6 +17,7 @@ from engine_core.src.indicators.technical import compute_all_indicators
 from engine_core.src.indicators.helpers import compute_helper_indicators
 from engine_core.src.indicators.avwap import compute_avwap
 from engine_core.src.modules.oracle import OracleModule
+from engine_core.src.modules.deception import DeceptionModule, DeceptionSignal
 from engine_core.src.risk.sizing import calculate_size_multiplier, calculate_position_size, calculate_max_possible_notional, get_module_factor
 from engine_core.src.risk.es_guardrails import (
     calculate_final_es,
@@ -120,7 +121,9 @@ class BacktestEngine:
         
         # Trading modules - only Oracle for validation
         self.oracle_module = OracleModule(self.params_dict)
-        
+        # DeceptionModule (lazy-init via set_deception_signals())
+        self.deception_module: Optional[DeceptionModule] = None
+
         # Per-symbol state
         self.symbol_data: Dict[str, pd.DataFrame] = {}
         # Engine-agnostic: no regime tracking
@@ -128,7 +131,7 @@ class BacktestEngine:
         self.symbol_liquidity_state: Dict[str, any] = {}
         self.symbol_pending_signals: Dict[str, List] = {}  # Signals waiting for confirmation
         self.symbol_last_master_side_flip: Dict[str, pd.Timestamp] = {}
-        
+
         # Results
         self.trades: List[Dict] = []
         self.fills: List[Dict] = []  # Track all fills separately (entry + exit)
@@ -176,7 +179,15 @@ class BacktestEngine:
         for symbol in self.data_loader.get_symbols():
             liq_df = self.data_loader.get_liquidity(symbol)
             self._has_liquidity_data[symbol] = (liq_df is not None and len(liq_df) > 0)
-    
+
+    def set_deception_signals(self, signals: List[DeceptionSignal]) -> None:
+        """Attach a DeceptionModule loaded with the bot's signals.
+
+        Call this BEFORE run(). When general.deception_mode is True, the engine
+        will route generate_signals() to this module instead of OracleModule.
+        """
+        self.deception_module = DeceptionModule(self.params_dict, signals)
+
     def prepare_symbol_data(self, symbol: str):
         """Prepare and compute indicators for symbol"""
         df = self.data_loader.get_15m_bars(symbol)
@@ -847,6 +858,10 @@ class BacktestEngine:
         
         # 1. Stops first (adverse_first)
         events.extend(self.collect_stop_events(symbol, fill_bar, fill_ts))
+
+        # 1b. DeceptionModule exit lattice (TP1/TP2/TSL) — checked after SL
+        # because same-bar pessimism is handled inside the method.
+        events.extend(self.collect_deception_exit_events(symbol, fill_bar, fill_ts, fill_idx))
         
         # 2. New entries (ORACLE signals only in Model-1)
         # ORACLE signals bypass funding window blocks
@@ -1761,6 +1776,18 @@ class BacktestEngine:
         
         # ORACLE mode: bypass all normal signal generation (for validation/testing only)
         oracle_mode = self.params.get('general', 'oracle_mode')
+
+        # DECEPTION mode: replay DeceptionLeaderBot signals through the engine.
+        # Mutually exclusive with oracle_mode. Signals are pre-loaded via
+        # set_deception_signals() and emitted at the bar matching entry_ts.
+        deception_mode = self.params.get('general', 'deception_mode', default=False)
+        if deception_mode and self.deception_module is not None:
+            sig = self.deception_module.generate_signal(symbol, df, idx, current_ts)
+            if sig is not None:
+                self.symbol_pending_signals[symbol].append(sig)
+                self._profile_counts['signals_generated'] += 1
+            return
+
         if oracle_mode:
             if oracle_mode == 'always_long':
                 oracle_signal = self.oracle_module.generate_always_long(symbol, df, idx, current_ts)
@@ -1830,7 +1857,103 @@ class BacktestEngine:
                 priority=1,
                 signal_ts=pos.entry_ts
             ))
-        
+
+        return events
+
+    def collect_deception_exit_events(
+        self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp, fill_idx: int
+    ) -> List[OrderEvent]:
+        """Collect TP1/TP2/TSL/SL events for DeceptionLeaderBot positions.
+
+        Mirrors core/sim_core.py simulate_exit_on_bars:
+          1. If TSL active: trail favourable extreme, exit on retracement > tsl_bps
+          2. Else: check SL and TP1 on the same bar
+             - If both hit on the same bar: pessimistic — SL wins
+             - If TP1 hits and tp1_frac < 1.0: activate TSL on remainder (if tsl_bps>0)
+             - If TP1 hits and tp1_frac == 1.0: full close at TP1
+          3. NO time-based exit (max_hold/timeout removed from the bot)
+        """
+        events: List[OrderEvent] = []
+        if symbol not in self.portfolio.positions:
+            return events
+        pos = self.portfolio.positions[symbol]
+        if pos.module != 'DECEPTION':
+            return events
+
+        high = float(fill_bar['high'])
+        low = float(fill_bar['low'])
+
+        # ── TSL active: trailing stop on the remainder ──────────────────────
+        if pos.tsl_active:
+            if pos.side == 'LONG':
+                if high > pos.tsl_extreme:
+                    pos.tsl_extreme = high
+                tsl_px = pos.tsl_extreme * (1.0 - pos.tsl_bps / 10000.0)
+                if low <= tsl_px:
+                    events.append(OrderEvent(
+                        event_type='DECEPTION_TSL_EXIT',
+                        symbol=symbol, module='DECEPTION', priority=1,
+                        signal_ts=pos.entry_ts,
+                    ))
+            else:  # SHORT
+                if low < pos.tsl_extreme:
+                    pos.tsl_extreme = low
+                tsl_px = pos.tsl_extreme * (1.0 + pos.tsl_bps / 10000.0)
+                if high >= tsl_px:
+                    events.append(OrderEvent(
+                        event_type='DECEPTION_TSL_EXIT',
+                        symbol=symbol, module='DECEPTION', priority=1,
+                        signal_ts=pos.entry_ts,
+                    ))
+            return events  # TSL active: skip fixed SL/TP checks
+
+        # ── Fixed SL / TP1 check (same-bar pessimism: SL wins) ──────────────
+        sl_hit = (pos.side == 'LONG' and low <= pos.stop_price) or \
+                 (pos.side == 'SHORT' and high >= pos.stop_price)
+        tp1_hit = False
+        if pos.tp1_price > 0:
+            tp1_hit = (pos.side == 'LONG' and high >= pos.tp1_price) or \
+                      (pos.side == 'SHORT' and low <= pos.tp1_price)
+
+        if sl_hit and tp1_hit:
+            # Same-bar pessimism: SL wins (matches sim_core)
+            events.append(OrderEvent(
+                event_type='STOP', symbol=symbol, module='DECEPTION',
+                priority=1, signal_ts=pos.entry_ts,
+            ))
+            return events
+        if sl_hit:
+            events.append(OrderEvent(
+                event_type='STOP', symbol=symbol, module='DECEPTION',
+                priority=1, signal_ts=pos.entry_ts,
+            ))
+            return events
+        if tp1_hit:
+            if pos.tp1_frac >= 1.0 - 1e-9:
+                # Full close at TP1
+                events.append(OrderEvent(
+                    event_type='DECEPTION_TP1_FULL',
+                    symbol=symbol, module='DECEPTION', priority=1,
+                    signal_ts=pos.entry_ts,
+                ))
+            else:
+                # Partial TP1 — activate TSL on remainder if enabled
+                events.append(OrderEvent(
+                    event_type='DECEPTION_TP1_PARTIAL',
+                    symbol=symbol, module='DECEPTION', priority=1,
+                    signal_ts=pos.entry_ts,
+                ))
+            return events
+        # TP2 check (only if TP1 already hit and TP2 configured)
+        if pos.tp1_hit and pos.tp2_price > 0:
+            tp2_hit = (pos.side == 'LONG' and high >= pos.tp2_price) or \
+                      (pos.side == 'SHORT' and low <= pos.tp2_price)
+            if tp2_hit:
+                events.append(OrderEvent(
+                    event_type='DECEPTION_TP2_EXIT',
+                    symbol=symbol, module='DECEPTION', priority=1,
+                    signal_ts=pos.entry_ts,
+                ))
         return events
     
     def collect_squeeze_tp1_events(self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp) -> List[OrderEvent]:
@@ -2042,7 +2165,7 @@ class BacktestEngine:
         if symbol in self.portfolio.positions:
             return events  # Already have position
         
-        # Check for ORACLE signals - they bypass max positions, loss halts, etc.
+        # Check for ORACLE/DECEPTION signals - they bypass max positions, loss halts, etc.
         debug_oracle = self.params.get('general', 'debug_oracle_flow', default=False)
         pending_signals = self.symbol_pending_signals.get(symbol, [])
         if debug_oracle:
@@ -2051,8 +2174,25 @@ class BacktestEngine:
                 if hasattr(sig, 'module'):
                     print(f"  Signal {i}: module={sig.module}, signal_bar_idx={getattr(sig, 'signal_bar_idx', 'N/A')}")
         oracle_signals = [s for s in pending_signals if hasattr(s, 'module') and s.module == 'ORACLE']
+        deception_signals = [s for s in pending_signals if hasattr(s, 'module') and s.module == 'DECEPTION']
         if debug_oracle:
-            print(f"[ORACLE DEBUG] Found {len(oracle_signals)} ORACLE signals")
+            print(f"[ORACLE DEBUG] Found {len(oracle_signals)} ORACLE signals, {len(deception_signals)} DECEPTION signals")
+        if deception_signals:
+            # DECEPTION signals bypass max positions, loss halts, etc. (but not position check above)
+            for signal in deception_signals:
+                signal_bar_idx_scalar = int(signal.signal_bar_idx) if hasattr(signal.signal_bar_idx, '__iter__') and not isinstance(signal.signal_bar_idx, str) else signal.signal_bar_idx
+                fill_idx_scalar = int(fill_idx) if hasattr(fill_idx, '__iter__') and not isinstance(fill_idx, str) else fill_idx
+                if fill_idx_scalar >= signal_bar_idx_scalar:
+                    events.append(OrderEvent(
+                        event_type='DECEPTION_ENTRY',
+                        symbol=symbol,
+                        module='DECEPTION',
+                        priority=1,
+                        signal_ts=signal.signal_ts,
+                        side=signal.side
+                    ))
+                    self._profile_counts['events_collected'] += 1
+                    return events
         if oracle_signals:
             # ORACLE signals bypass max positions, loss halts, etc. (but not position check above)
             for signal in oracle_signals:
@@ -2331,6 +2471,18 @@ class BacktestEngine:
             
             if event.event_type == 'STOP':
                 self.execute_stop(symbol, fill_bar, fill_ts)
+            elif event.event_type == 'DECEPTION_ENTRY':
+                # DECEPTION signals bypass all filters and go directly to execute_entry
+                self.execute_entry(event, fill_bar, fill_ts)
+                self._profile_counts['events_executed'] += 1
+            elif event.event_type in ('DECEPTION_TP1_FULL', 'DECEPTION_TP2_EXIT', 'DECEPTION_TSL_EXIT'):
+                # Full close at TP1/TP2/TSL — taker fee, exit at target price
+                self.execute_deception_exit(symbol, fill_bar, fill_ts, event.event_type)
+                self._profile_counts['events_executed'] += 1
+            elif event.event_type == 'DECEPTION_TP1_PARTIAL':
+                # Partial close at TP1, activate TSL on remainder
+                self.execute_deception_tp1_partial(symbol, fill_bar, fill_ts)
+                self._profile_counts['events_executed'] += 1
             elif event.event_type == 'ORACLE_ENTRY':
                 # ORACLE signals bypass all filters and go directly to execute_entry
                 debug_oracle = self.params.get('general', 'debug_oracle_flow', default=False)
@@ -2640,8 +2792,159 @@ class BacktestEngine:
             })
             self.symbol_daily_pnl[symbol] += pnl
             self.symbol_prev_prices.pop(symbol, None)
-    
-    def execute_squeeze_tp1(self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp):
+
+    def execute_deception_exit(
+        self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp, event_type: str
+    ):
+        """Full close at TP1/TP2/TSL for DeceptionModule positions.
+
+        All exits are TAKER (market orders) — matches live PARITY 2026-07-12.
+        Fill price is the target price (TP1/TP2/TSL) with no slippage model
+        for TP1/TP2 (limit-style target) and a small slippage for TSL.
+        """
+        if symbol not in self.portfolio.positions:
+            return
+        pos = self.portfolio.positions[symbol]
+        if pos.module != 'DECEPTION':
+            return
+
+        # Determine fill price and reason from event type
+        if event_type == 'DECEPTION_TP1_FULL':
+            fill_price = pos.tp1_price
+            reason = 'TP1'
+        elif event_type == 'DECEPTION_TP2_EXIT':
+            fill_price = pos.tp2_price
+            reason = 'TP2'
+        elif event_type == 'DECEPTION_TSL_EXIT':
+            # TSL fill: trailing stop price with small slippage
+            if pos.side == 'LONG':
+                fill_price = pos.tsl_extreme * (1.0 - pos.tsl_bps / 10000.0)
+            else:
+                fill_price = pos.tsl_extreme * (1.0 + pos.tsl_bps / 10000.0)
+            reason = 'TSL'
+        else:
+            return
+
+        notional = abs(pos.qty * fill_price)
+        fee_bps = self.params.get_default('general', 'taker_fee_bps')
+        if self.stress_fees:
+            fee_bps *= 1.5
+        if not self.cost_model_enabled:
+            fee_bps = 0.0
+        fees = notional * (fee_bps / 10000.0)
+        slippage_cost_usd = 0.0  # TP1/TP2 are limit-style targets; TSL uses the trailing price directly
+
+        # Record exit fill
+        self._record_fill(
+            position_id=pos.position_id, ts=fill_ts, symbol=symbol,
+            module='DECEPTION', leg='EXIT',
+            side='SELL' if pos.side == 'LONG' else 'BUY',
+            qty=pos.qty, price=fill_price, notional_usd=notional,
+            slippage_bps_applied=0.0, slippage_cost_usd=slippage_cost_usd,
+            fee_bps=fee_bps, fee_usd=fees, liquidity='taker',
+            participation_pct=0.0, adv60_usd=0.0, intended_price=fill_price,
+        )
+
+        closed_pos, pnl = self.portfolio.close_position(
+            symbol, fill_price, fill_ts, reason, fees, slippage_cost_usd
+        )
+        if closed_pos:
+            self._record_ledger_event(
+                ts=fill_ts, event='EXIT_FILL', position_id=pos.position_id,
+                symbol=symbol, module='DECEPTION', leg='EXIT',
+                side='SELL' if pos.side == 'LONG' else 'BUY',
+                qty=pos.qty, price=fill_price, notional_usd=notional,
+                fee_usd=fees, slippage_cost_usd=slippage_cost_usd,
+                funding_usd=0.0, cash_delta_usd=pnl, note=f"Deception {reason} exit",
+            )
+            self.trades.append({
+                'ts': fill_ts, 'symbol': symbol, 'side': pos.side,
+                'module': 'DECEPTION', 'qty': pos.qty, 'price': fill_price,
+                'fees': fees, 'slip_bps': 0.0, 'participation_pct': 0.0,
+                'post_only': False,
+                'stop_dist': abs(pos.entry_price - pos.stop_price),
+                'ES_used_before': 0.0, 'ES_used_after': 0.0,
+                'reason': reason, 'pnl': pnl,
+                'position_id': pos.position_id,
+                'open_ts': pos.entry_ts, 'close_ts': fill_ts,
+                'age_bars': 0, 'gap_through': False,
+                'trap_type': pos.trap_type, 'deception_score': pos.deception_score,
+            })
+            self.symbol_daily_pnl[symbol] += pnl
+            self.symbol_prev_prices.pop(symbol, None)
+
+    def execute_deception_tp1_partial(
+        self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp
+    ):
+        """Partial close at TP1, then activate TSL on the remainder.
+
+        Mirrors sim_core: tp1_frac of the position closes at TP1 (taker fee),
+        the remainder stays open with the fixed SL cancelled and a TSL
+        activated at tsl_bps callback from the favourable extreme.
+        """
+        if symbol not in self.portfolio.positions:
+            return
+        pos = self.portfolio.positions[symbol]
+        if pos.module != 'DECEPTION' or pos.tp1_price <= 0:
+            return
+
+        fill_price = pos.tp1_price
+        partial_qty = pos.qty * pos.tp1_frac
+        notional = abs(partial_qty * fill_price)
+        fee_bps = self.params.get_default('general', 'taker_fee_bps')
+        if self.stress_fees:
+            fee_bps *= 1.5
+        if not self.cost_model_enabled:
+            fee_bps = 0.0
+        fees = notional * (fee_bps / 10000.0)
+
+        # Record partial exit fill
+        self._record_fill(
+            position_id=pos.position_id, ts=fill_ts, symbol=symbol,
+            module='DECEPTION', leg='EXIT',
+            side='SELL' if pos.side == 'LONG' else 'BUY',
+            qty=partial_qty, price=fill_price, notional_usd=notional,
+            slippage_bps_applied=0.0, slippage_cost_usd=0.0,
+            fee_bps=fee_bps, fee_usd=fees, liquidity='taker',
+            participation_pct=0.0, adv60_usd=0.0, intended_price=fill_price,
+        )
+
+        # Reduce position qty and record partial PnL
+        long = pos.side == 'LONG'
+        sign = 1.0 if long else -1.0
+        partial_pnl = sign * (fill_price - pos.entry_price) * partial_qty - fees
+        self.portfolio.cash += partial_pnl
+        self.portfolio.total_pnl += partial_pnl
+        self.portfolio.fees_paid += fees
+        pos.qty -= partial_qty
+        pos.tp1_hit = True
+
+        # Activate TSL on the remainder if configured
+        if pos.tsl_bps > 0:
+            pos.tsl_active = True
+            pos.tsl_extreme = fill_price  # start tracking from TP1 fill
+        # else: remainder continues with fixed SL (checked by collect_stop_events / collect_deception_exit_events)
+
+        self._record_ledger_event(
+            ts=fill_ts, event='PARTIAL_EXIT_FILL', position_id=pos.position_id,
+            symbol=symbol, module='DECEPTION', leg='EXIT',
+            side='SELL' if long else 'BUY',
+            qty=partial_qty, price=fill_price, notional_usd=notional,
+            fee_usd=fees, slippage_cost_usd=0.0, funding_usd=0.0,
+            cash_delta_usd=partial_pnl, note="Deception TP1 partial",
+        )
+        self.trades.append({
+            'ts': fill_ts, 'symbol': symbol, 'side': pos.side,
+            'module': 'DECEPTION', 'qty': partial_qty, 'price': fill_price,
+            'fees': fees, 'slip_bps': 0.0, 'participation_pct': 0.0,
+            'post_only': False, 'stop_dist': abs(pos.entry_price - pos.stop_price),
+            'ES_used_before': 0.0, 'ES_used_after': 0.0,
+            'reason': 'TP1_PARTIAL', 'pnl': partial_pnl,
+            'position_id': pos.position_id, 'open_ts': pos.entry_ts,
+            'close_ts': fill_ts, 'age_bars': 0, 'gap_through': False,
+            'trap_type': pos.trap_type, 'deception_score': pos.deception_score,
+        })
+        self.symbol_daily_pnl[symbol] += partial_pnl
         """Execute SQUEEZE TP1 exit"""
         if symbol not in self.portfolio.positions:
             return
@@ -3595,11 +3898,24 @@ class BacktestEngine:
         
         if debug_oracle and event.module == 'ORACLE':
             print(f"[ORACLE DEBUG] execute_entry: Adding position: symbol={event.symbol}, qty={adjusted_qty}, price={fill_price}, side={signal.side}")
+        # DeceptionModule signals carry the bot's exit lattice (TP1/TP2/TSL).
+        # Pass them through to Position so collect_deception_exit_events can use them.
+        deception_kwargs = {}
+        if event.module == 'DECEPTION' and isinstance(signal, DeceptionSignal):
+            deception_kwargs = dict(
+                tp1_price=signal.tp1_price,
+                tp2_price=signal.tp2_price,
+                tp1_frac=signal.tp1_frac,
+                tsl_bps=signal.tsl_bps,
+                deception_score=signal.deception_score,
+                trap_type=signal.trap_type,
+            )
         self.portfolio.add_position(
             event.symbol, adjusted_qty, fill_price, fill_ts,
             effective_stop_price, effective_stop_price,  # Initial stop and trail
             event.module, signal.side, fees, 0.0,
-            entry_idx=entry_idx  # Store bar index for performance
+            entry_idx=entry_idx,  # Store bar index for performance
+            **deception_kwargs,
         )
         self.symbol_prev_prices[event.symbol] = fill_price
         if debug_oracle and event.module == 'ORACLE':
