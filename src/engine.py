@@ -4049,13 +4049,13 @@ class BacktestEngine:
         
         # Calculate new stop/trail
         # Strategy-specific stop/trail calculation removed from engine core
-        # Oracle positions use fixed stops (no trailing)
-        if pos.module != 'ORACLE':
+        # Oracle and Deception positions use fixed stops (no trailing)
+        if pos.module not in ('ORACLE', 'DECEPTION'):
             raise NotImplementedError(
                 "Strategy-specific stop/trail calculation not available in engine core. "
                 "Use oracle_mode for validation."
             )
-        # Oracle positions keep original stop (no trailing)
+        # Oracle/Deception positions keep original stop (no trailing)
         new_stop = pos.stop_price
         new_trail = None
         

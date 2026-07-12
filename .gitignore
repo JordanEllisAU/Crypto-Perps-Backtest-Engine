@@ -59,5 +59,6 @@ artifacts/
 runs/
 test_debug/
 test_run/
+runtime/
 *.log
 test_output.txt
