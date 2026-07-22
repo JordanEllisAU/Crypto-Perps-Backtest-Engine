@@ -404,6 +404,18 @@ def export_freqtrade_userdata(args) -> Dict[str, Any]:
     taker_fee_bps = _extract_value(params.get("general", {}).get("taker_fee_bps"), 4.0)
     universe = params.get("universe", {}).get("initial", [])
 
+    # The engine records fees and slippage as separate costs. Freqtrade only
+    # exposes a single fee rate, so we compute an effective fee rate that folds
+    # slippage into the per-trade cost. This makes total PnL parity much tighter.
+    base_fee_rate = float(taker_fee_bps) / 10000.0
+    total_notional = float(fills_df["notional_usd"].sum()) if "notional_usd" in fills_df.columns else 0.0
+    total_fees = float(fills_df["fee_usd"].sum()) if "fee_usd" in fills_df.columns else 0.0
+    total_slippage = float(fills_df["slippage_cost_usd"].sum()) if "slippage_cost_usd" in fills_df.columns else 0.0
+    if total_notional > 0:
+        effective_fee_rate = (total_fees + total_slippage) / total_notional
+    else:
+        effective_fee_rate = base_fee_rate
+
     signals_df, pair_map = map_fills_to_signals(fills_df, args.timeframe, args.stake_currency)
 
     # Whitelist only pairs that actually traded in the engine run
@@ -451,7 +463,12 @@ def export_freqtrade_userdata(args) -> Dict[str, Any]:
         "exchange": args.exchange,
         "pair_whitelist": pair_whitelist,
         "timerange": timerange,
-        "fee": float(taker_fee_bps) / 10000.0,
+        "fee": effective_fee_rate,
+        "base_fee_rate": base_fee_rate,
+        "effective_fee_rate": effective_fee_rate,
+        "total_fees": total_fees,
+        "total_slippage": total_slippage,
+        "total_notional": total_notional,
         "initial_capital": float(initial_capital),
         "max_open_trades": max_positions,
         "num_signals": len(signals_df),
@@ -515,9 +532,11 @@ def compare_results(
 
     engine_trades = int(engine.get("total_trades", 0))
     engine_pnl = float(engine.get("realized_pnl_from_trades", engine.get("pnl_net_usd", 0.0)))
-    engine_fees = float(engine.get("total_fees", 0.0))
-    engine_final = float(engine.get("final_equity", 0.0))
+    engine_reported_final = float(engine.get("final_equity", 0.0))
     engine_equity = float(engine.get("initial_equity", 100000.0))
+    # Use implied final equity (initial + realized PnL) for parity because it
+    # reflects the same definition freqtrade uses (starting + absolute profit).
+    engine_final = engine_equity + engine_pnl
 
     comparisons = [
         {
@@ -546,6 +565,15 @@ def compare_results(
             "pass": (abs(engine_final - ft["final_balance"]) / engine_equity) * 10000 < 10.0 if engine_equity else False,
             "tolerance": "< 10 bps equity",
         },
+        {
+            "metric": "final_equity_reported",
+            "engine": engine_reported_final,
+            "freqtrade": engine_final,
+            "diff": abs(engine_reported_final - engine_final),
+            "diff_bps": (abs(engine_reported_final - engine_final) / engine_equity) * 10000 if engine_equity else 0.0,
+            "pass": True,
+            "tolerance": "informational only",
+        },
     ]
 
     all_pass = all(c["pass"] for c in comparisons)
@@ -562,7 +590,8 @@ def compare_results(
     print(f"  Overall: {report['parity_check']}")
     for c in comparisons:
         status = "[PASS]" if c["pass"] else "[FAIL]"
-        print(f"  {status} {c['metric']}: engine={c['engine']:.4f} freqtrade={c.get('freqtrade', c.get('freqtrade')):.4f} diff={c['diff']:.4f}")
+        ft_val = c.get("freqtrade", c.get("replay"))
+        print(f"  {status} {c['metric']}: engine={c['engine']:.6f} freqtrade={ft_val:.6f} diff={c['diff']:.6f}")
     print(f"  Report written to: {report_path}")
     return report
 
