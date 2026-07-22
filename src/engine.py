@@ -824,7 +824,7 @@ class BacktestEngine:
             try:
                 with open('artifacts/oracle_debug.log', 'a') as f:
                     f.write(msg)
-            except:
+            except OSError:
                 pass
         if not self.loss_halt_state.halt_manual:
             if debug_oracle:
