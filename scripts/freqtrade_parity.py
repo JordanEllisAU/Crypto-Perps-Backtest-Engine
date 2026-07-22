@@ -87,7 +87,17 @@ def load_fills(run_dir: Path) -> pd.DataFrame:
 
 
 def map_fills_to_signals(fills_df: pd.DataFrame, timeframe: str, stake_currency: str) -> Tuple[pd.DataFrame, Dict[str, str]]:
-    """Aggregate fills into per-candle entry/exit signals keyed by signal candle."""
+    """Aggregate fills into per-candle entry/exit signals keyed by signal candle.
+
+    Freqtrade shifts entry/exit columns by one candle before acting on them, so a
+    signal at time `t` is executed at `t + 1`. We use:
+      - `signal_ts`: the candle where the signal column is set.
+      - `exec_ts`:   the candle where freqtrade actually acts (`signal_ts + 1`).
+
+    For same-bar exits (entry and exit share the same fill timestamp) we push the
+    exit signal one candle later so freqtrade has an open position before it sees
+    the exit signal.
+    """
     timeframe_td = pd.Timedelta(timeframe)
 
     def _action(row: pd.Series) -> str:
@@ -97,30 +107,67 @@ def map_fills_to_signals(fills_df: pd.DataFrame, timeframe: str, stake_currency:
             return "enter_long" if side == "BUY" else "enter_short"
         return "exit_long" if side == "SELL" else "exit_short"
 
-    fills_df = fills_df.copy()
-    fills_df["pair"] = fills_df["symbol"].apply(lambda s: _symbol_to_pair(s, stake_currency))
-    fills_df["action"] = fills_df.apply(_action, axis=1)
-    # Freqtrade signals are evaluated on one candle and filled on the next candle.
-    fills_df["fill_ts"] = fills_df["ts"].dt.floor(timeframe_td)
-    fills_df["signal_ts"] = fills_df["fill_ts"] - timeframe_td
+    df = fills_df.copy()
+    df["pair"] = df["symbol"].apply(lambda s: _symbol_to_pair(s, stake_currency))
+    df["action"] = df.apply(_action, axis=1)
+    df["fill_ts"] = df["ts"].dt.floor(timeframe_td)
 
-    grouped = (
-        fills_df.groupby(["pair", "action", "signal_ts"])
-        .apply(
-            lambda g: pd.Series(
-                {
-                    "symbol": g["symbol"].iloc[0],
-                    "fill_ts": g["fill_ts"].iloc[0],
-                    "qty": g["qty"].sum(),
-                    "price": (g["price"] * g["qty"]).sum() / g["qty"].sum(),
-                    "fee_bps": g["fee_bps"].iloc[0],
-                }
-            )
-        )
-        .reset_index()
+    # Compute per-position entry fill times to detect same-bar exits.
+    entry_ts_by_position = (
+        df[df["leg"].str.upper() == "ENTRY"]
+        .groupby("position_id")["fill_ts"]
+        .first()
+        .to_dict()
     )
 
-    pair_map = dict(zip(fills_df["symbol"], fills_df["pair"]))
+    rows = []
+    for _, row in df.iterrows():
+        action = row["action"]
+        fill_ts = row["fill_ts"]
+        if action.startswith("enter_"):
+            signal_ts = fill_ts - timeframe_td
+        else:
+            entry_ts = entry_ts_by_position.get(row["position_id"])
+            # If the exit happens in the same candle as the entry, push the exit
+            # signal one candle later so freqtrade can exit the opened position.
+            if entry_ts is not None and fill_ts == entry_ts:
+                signal_ts = fill_ts
+            else:
+                signal_ts = fill_ts - timeframe_td
+        exec_ts = signal_ts + timeframe_td
+        rows.append(
+            {
+                "pair": row["pair"],
+                "symbol": row["symbol"],
+                "action": action,
+                "signal_ts": signal_ts,
+                "exec_ts": exec_ts,
+                "fill_ts": fill_ts,
+                "qty": float(row["qty"]),
+                "price": float(row["price"]),
+                "fee_bps": float(row["fee_bps"]),
+            }
+        )
+
+    sig_df = pd.DataFrame(rows)
+    sig_df["notional"] = sig_df["price"] * sig_df["qty"]
+    grouped = (
+        sig_df.groupby(["pair", "action", "signal_ts"], as_index=False)
+        .agg(
+            {
+                "symbol": "first",
+                "exec_ts": "first",
+                "fill_ts": "first",
+                "qty": "sum",
+                "notional": "sum",
+                "fee_bps": "first",
+            }
+        )
+    )
+    grouped["price"] = grouped["notional"] / grouped["qty"]
+    grouped = grouped.drop(columns=["notional"])
+
+    pair_map = dict(zip(df["symbol"], df["pair"]))
     return grouped, pair_map
 
 
@@ -175,10 +222,10 @@ def write_signals_json(output_dir: Path, signals: pd.DataFrame) -> Path:
     for _, row in signals.iterrows():
         pair = row["pair"]
         action = row["action"]
-        fill_ts = row["fill_ts"]
+        exec_ts = row["exec_ts"]
         signal_ts = row["signal_ts"]
         payload.setdefault(pair, {}).setdefault(action, {})[signal_ts.isoformat()] = {
-            "fill_ts": fill_ts.isoformat(),
+            "exec_ts": exec_ts.isoformat(),
             "price": float(row["price"]),
             "qty": float(row["qty"]),
             "fee_bps": float(row["fee_bps"]),
@@ -321,11 +368,11 @@ class EngineParityStrategy(IStrategy):
                 qty_map = {{}}
                 for signal_ts_iso, rec in records.items():
                     signal_ts = pd.Timestamp(signal_ts_iso)
-                    fill_ts = pd.Timestamp(rec["fill_ts"])
+                    exec_ts = pd.Timestamp(rec["exec_ts"])
                     signal_ts_map[signal_ts] = True
-                    price_map[fill_ts] = float(rec["price"])
+                    price_map[exec_ts] = float(rec["price"])
                     if action.startswith("enter_"):
-                        qty_map[fill_ts] = float(rec["qty"])
+                        qty_map[exec_ts] = float(rec["qty"])
                 self._signals[action][pair] = signal_ts_map
                 self._prices[action][pair] = price_map
                 if action.startswith("enter_"):
