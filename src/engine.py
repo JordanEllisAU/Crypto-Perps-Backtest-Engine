@@ -619,9 +619,11 @@ class BacktestEngine:
             for symbol in self.portfolio.positions.keys():
                 df = self.symbol_data.get(symbol)
                 if df is not None and len(df) > 0:
-                    # Get the last bar's close price
-                    last_bar = df.iloc[-1]
-                    symbol_prices[symbol] = last_bar['close']
+                    # Use the last bar within the run window (no look-ahead)
+                    valid_df = df[df['ts'] <= end_ts]
+                    if len(valid_df) > 0:
+                        last_bar = valid_df.iloc[-1]
+                        symbol_prices[symbol] = last_bar['close']
             
             # Force-close all positions
             for pos_symbol in list(self.portfolio.positions.keys()):
@@ -641,15 +643,22 @@ class BacktestEngine:
                         
                     fees = notional * (fee_bps / 10000.0)
                     
-                    # Calculate slippage
+                    # Calculate slippage using the same run-window bar
+                    close_idx = -1
                     df = self.symbol_data.get(pos_symbol)
                     if df is not None and len(df) > 0:
-                        last_bar = df.iloc[-1]
-                        mid_price = (last_bar['high'] + last_bar['low']) / 2.0 if 'high' in last_bar and 'low' in last_bar else exit_price
-                        slippage_params = self.params_dict.get('slippage_costs', {})
-                        slippage_bps_applied = slippage_params.get('base_slip_bps_intercept', 2.0)
-                        fill_idx = len(df) - 1
-                        adv60_usd = calculate_adv_60m(df['notional'], fill_idx) if fill_idx >= 0 else 0.0
+                        valid_df = df[df['ts'] <= end_ts]
+                        if len(valid_df) > 0:
+                            last_bar = valid_df.iloc[-1]
+                            close_idx = int(valid_df.index[-1])
+                            mid_price = (last_bar['high'] + last_bar['low']) / 2.0 if 'high' in last_bar and 'low' in last_bar else exit_price
+                            slippage_params = self.params_dict.get('slippage_costs', {})
+                            slippage_bps_applied = slippage_params.get('base_slip_bps_intercept', 2.0)
+                            adv60_usd = calculate_adv_60m(df['notional'], close_idx) if close_idx >= 0 else 0.0
+                        else:
+                            mid_price = exit_price
+                            slippage_bps_applied = 2.0
+                            adv60_usd = 0.0
                     else:
                         mid_price = exit_price
                         slippage_bps_applied = 2.0
@@ -718,7 +727,7 @@ class BacktestEngine:
                                 entry_idx = int(idx_result) if hasattr(idx_result, '__iter__') and not isinstance(idx_result, str) else int(idx_result)
                             else:
                                 entry_idx = -1
-                        close_idx = len(df) - 1 if df is not None else -1
+                        # close_idx was set from the run-window bar above
                         age_bars = (close_idx - entry_idx) if entry_idx >= 0 and close_idx >= 0 else pos.age_bars if hasattr(pos, 'age_bars') else 0
                         
                         self.trades.append({
@@ -904,19 +913,22 @@ class BacktestEngine:
                         if idx < len(pos_df):
                             symbol_prices[pos_symbol] = pos_df['close'].iloc[idx]
                         else:
-                            symbol_prices[pos_symbol] = pos_df.iloc[-1]['close'] if len(pos_df) > 0 else 0.0
+                            valid_df = pos_df[pos_df['ts'] <= fill_ts]
+                            symbol_prices[pos_symbol] = valid_df.iloc[-1]['close'] if len(valid_df) > 0 else 0.0
                     else:
-                        # Fallback: use most recent bar
-                        symbol_prices[pos_symbol] = pos_df.iloc[-1]['close'] if len(pos_df) > 0 else 0.0
+                        # Fallback: use most recent bar at or before fill_ts
+                        valid_df = pos_df[pos_df['ts'] <= fill_ts]
+                        symbol_prices[pos_symbol] = valid_df.iloc[-1]['close'] if len(valid_df) > 0 else 0.0
                 else:
                     # Fallback: DataFrame lookup
                     pos_bar = pos_df[pos_df['ts'] == fill_ts]
                     if len(pos_bar) > 0:
                         symbol_prices[pos_symbol] = pos_bar.iloc[0]['close']
                     else:
-                        # Fallback: use most recent bar
-                        if len(pos_df) > 0:
-                            symbol_prices[pos_symbol] = pos_df.iloc[-1]['close']
+                        # Fallback: use most recent bar at or before fill_ts
+                        valid_df = pos_df[pos_df['ts'] <= fill_ts]
+                        if len(valid_df) > 0:
+                            symbol_prices[pos_symbol] = valid_df.iloc[-1]['close']
         
         # Update equity once with all symbol prices
         if symbol_prices:
@@ -2622,17 +2634,21 @@ class BacktestEngine:
         slippage_params = self.params_dict.get('slippage_costs', {})
         slippage_bps_base = slippage_params.get('base_slip_bps_intercept', 2.0)
         
-        # Use fill_stop_run to get fill price and gap_through
+        # Stop exits use the opposite trade side to the held position.
+        # Cost-model toggle removes fill-price slippage.
+        if not self.cost_model_enabled:
+            slippage_bps_base = 0.0
+        trade_side = 'SHORT' if pos.side == 'LONG' else 'LONG'
         fill_price, gap_through = fill_stop_run(
-            stop_price, pos.side, fill_bar['high'], fill_bar['low'],
+            stop_price, trade_side, fill_bar['high'], fill_bar['low'],
             mid_price, slippage_bps_base
         )
         
-        # Calculate actual slippage_bps_applied from the fill
-        if pos.side == 'LONG':
-            slippage_bps_applied = ((fill_price - stop_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps_base
-        else:  # SHORT
+        # Positive slippage for a stop exit: fill is worse than the stop trigger
+        if pos.side == 'LONG':  # selling
             slippage_bps_applied = ((stop_price - fill_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps_base
+        else:  # SHORT, buying back
+            slippage_bps_applied = ((fill_price - stop_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps_base
         
         # Log gap-through to forensic log
         if gap_through:
@@ -2649,9 +2665,9 @@ class BacktestEngine:
                 'bar_low': fill_bar['low']
             })
         
-        # Calculate fees
+        # Calculate fees and slippage using the intended stop trigger price
         # Stop-market exits are always taker
-        notional = abs(pos.qty * fill_price)
+        notional = abs(pos.qty * stop_price)
         fill_is_taker = True  # Stop-market exits are always taker
         fee_bps = self.params.get_default('general', 'taker_fee_bps') if fill_is_taker else self.params.get_default('general', 'maker_fee_bps')
         if self.stress_fees:
@@ -2691,7 +2707,7 @@ class BacktestEngine:
             leg='EXIT',
             side='SELL' if pos.side == 'LONG' else 'BUY',
             qty=pos.qty,
-            price=fill_price,
+            price=stop_price,
             notional_usd=notional,
             slippage_bps_applied=slippage_bps_applied,
             slippage_cost_usd=slippage_cost_usd,
@@ -2740,9 +2756,9 @@ class BacktestEngine:
             })
             # Log violation but continue (position is being closed anyway)
         
-        # Close position (this calculates PnL internally and returns it)
+        # Close position at the intended stop price with explicit slippage cost
         closed_pos, pnl = self.portfolio.close_position(
-            symbol, fill_price, fill_ts, 'STOP', fees, slippage_cost_usd
+            symbol, stop_price, fill_ts, 'STOP', fees, slippage_cost_usd
         )
         
         if closed_pos:
@@ -2758,7 +2774,7 @@ class BacktestEngine:
                 leg='EXIT',
                 side='SELL' if pos.side == 'LONG' else 'BUY',
                 qty=pos.qty,
-                price=fill_price,
+                price=stop_price,
                 notional_usd=notional,
                 fee_usd=fees,
                 slippage_cost_usd=slippage_cost_usd,
@@ -2774,7 +2790,7 @@ class BacktestEngine:
                 'side': pos.side,
                 'module': pos.module,
                 'qty': pos.qty,
-                'price': fill_price,
+                'price': stop_price,
                 'fees': fees,
                 'slip_bps': slippage_bps_applied,
                 'participation_pct': 0.0,
@@ -2799,8 +2815,7 @@ class BacktestEngine:
         """Full close at TP1/TP2/TSL for DeceptionModule positions.
 
         All exits are TAKER (market orders) — matches live PARITY 2026-07-12.
-        Fill price is the target price (TP1/TP2/TSL) with no slippage model
-        for TP1/TP2 (limit-style target) and a small slippage for TSL.
+        Fill price is the target price (TP1/TP2/TSL) with no additional slippage model.
         """
         if symbol not in self.portfolio.positions:
             return
@@ -2816,7 +2831,7 @@ class BacktestEngine:
             fill_price = pos.tp2_price
             reason = 'TP2'
         elif event_type == 'DECEPTION_TSL_EXIT':
-            # TSL fill: trailing stop price with small slippage
+            # TSL fill: the trailing stop price itself (extreme adjusted by the callback)
             if pos.side == 'LONG':
                 fill_price = pos.tsl_extreme * (1.0 - pos.tsl_bps / 10000.0)
             else:
@@ -2832,7 +2847,7 @@ class BacktestEngine:
         if not self.cost_model_enabled:
             fee_bps = 0.0
         fees = notional * (fee_bps / 10000.0)
-        slippage_cost_usd = 0.0  # TP1/TP2 are limit-style targets; TSL uses the trailing price directly
+        slippage_cost_usd = 0.0  # TP1/TP2 are limit-style targets; TSL uses the trailing stop price directly
 
         # Record exit fill
         self._record_fill(
@@ -3108,7 +3123,12 @@ class BacktestEngine:
         slippage_params = self.params_dict.get('slippage_costs', {})
         slippage_bps_base = slippage_params.get('base_slip_bps_intercept', 2.0)
         
-        # Market order: use current price with slippage
+        # Cost-model toggle removes fill-price slippage
+        if not self.cost_model_enabled:
+            slippage_bps_base = 0.0
+        
+        # Market order: use current mid with slippage.  mid_price is the intended fill;
+        # fill_price is the actual (worse) execution.
         if pos.side == 'LONG':
             fill_price = max(fill_bar['low'], mid_price * (1 - slippage_bps_base / 10000.0))
         else:  # SHORT
@@ -3116,14 +3136,14 @@ class BacktestEngine:
         
         gap_through = False
         
-        # Calculate slippage
-        if pos.side == 'LONG':
-            slippage_bps_applied = ((fill_price - mid_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps_base
-        else:  # SHORT
-            slippage_bps_applied = ((mid_price - fill_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps_base
+        # Positive slippage relative to intended mid_price
+        if mid_price > 0:
+            slippage_bps_applied = abs((fill_price - mid_price) / mid_price) * 10000.0
+        else:
+            slippage_bps_applied = slippage_bps_base
         
-        # Calculate fees (market order = taker)
-        notional = abs(pos.qty * fill_price)
+        # Calculate fees and slippage using the intended mid_price
+        notional = abs(pos.qty * mid_price)
         fee_bps = self.params.get_default('general', 'taker_fee_bps')
         if self.stress_fees:
             fee_bps *= 1.5
@@ -3160,7 +3180,7 @@ class BacktestEngine:
             leg='EXIT',
             side='SELL' if pos.side == 'LONG' else 'BUY',
             qty=pos.qty,
-            price=fill_price,
+            price=mid_price,
             notional_usd=notional,
             slippage_bps_applied=slippage_bps_applied,
             slippage_cost_usd=slippage_cost_usd,
@@ -3168,7 +3188,8 @@ class BacktestEngine:
             fee_usd=fees,
             liquidity='taker',
             participation_pct=participation_pct,
-            adv60_usd=adv60_usd
+            adv60_usd=adv60_usd,
+            intended_price=mid_price
         )
         
         # Calculate age_bars
@@ -3181,9 +3202,9 @@ class BacktestEngine:
             entry_idx = df[df['ts'] == pos.entry_ts].index[0] if len(df[df['ts'] == pos.entry_ts]) > 0 else -1
         age_bars = (close_idx - entry_idx) if entry_idx >= 0 and close_idx >= 0 else pos.age_bars
         
-        # Close position
+        # Close position at intended mid_price with explicit slippage cost
         closed_pos, pnl = self.portfolio.close_position(
-            symbol, fill_price, fill_ts, 'VOL_EXIT', fees, slippage_cost_usd
+            symbol, mid_price, fill_ts, 'VOL_EXIT', fees, slippage_cost_usd
         )
         
         if closed_pos:
@@ -3197,7 +3218,7 @@ class BacktestEngine:
                 leg='EXIT',
                 side='SELL' if pos.side == 'LONG' else 'BUY',
                 qty=pos.qty,
-                price=fill_price,
+                price=mid_price,
                 notional_usd=notional,
                 fee_usd=fees,
                 slippage_cost_usd=slippage_cost_usd,
@@ -3213,7 +3234,7 @@ class BacktestEngine:
                 'side': pos.side,
                 'module': pos.module,
                 'qty': pos.qty,
-                'price': fill_price,
+                'price': mid_price,
                 'fees': fees,
                 'slip_bps': slippage_bps_applied,
                 'participation_pct': participation_pct,
@@ -3360,6 +3381,10 @@ class BacktestEngine:
             'post_only': post_only
         })
         
+        # Cost-model toggle removes fill-price slippage as well as fees
+        if not self.cost_model_enabled:
+            slippage_bps = 0.0
+        
         fill_price, gap_through = fill_stop_run(
             order.trigger_price, order.side, fill_bar['high'], fill_bar['low'],
             mid_price, slippage_bps
@@ -3388,9 +3413,9 @@ class BacktestEngine:
         if not is_valid:
             return  # Reject order
         
-        # Calculate fees
+        # Calculate fees and slippage using the intended trigger price
         # Stop-run entries are taker, unless post_only=True (maker)
-        notional = abs(adjusted_qty * adjusted_price)
+        notional = abs(adjusted_qty * order.trigger_price)
         fill_is_taker = not post_only  # Taker unless post-only resting fill
         fee_bps = self.params.get_default('general', 'taker_fee_bps') if fill_is_taker else self.params.get_default('general', 'maker_fee_bps')
         if self.stress_fees:
@@ -3400,6 +3425,17 @@ class BacktestEngine:
             slippage_bps = 0.0
             
         fees = notional * (fee_bps / 10000.0)
+        
+        # Actual slippage experienced relative to intended trigger
+        if order.side == 'LONG':
+            slippage_bps_applied = ((fill_price - order.trigger_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
+        else:  # SHORT
+            slippage_bps_applied = ((order.trigger_price - fill_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
+        
+        if not self.cost_model_enabled:
+            slippage_bps_applied = 0.0
+        
+        slippage_cost_usd = notional * (slippage_bps_applied / 10000.0)
         
         # Calculate stop price based on side
         atr = self.symbol_data[order.symbol].iloc[order.signal_bar_idx].get('atr', 0)
@@ -3438,13 +3474,13 @@ class BacktestEngine:
             else:  # SHORT
                 tp1_price = adjusted_price - (tp1_mult_R * initial_R)
         
-        # Add position
+        # Add position using intended trigger price; costs already deducted
         # OPTIMIZATION: Pass entry_idx to avoid future lookups
         self.portfolio.add_position(
-            order.symbol, adjusted_qty, adjusted_price, fill_ts,
+            order.symbol, adjusted_qty, order.trigger_price, fill_ts,
             stop_price,  # Stop
             stop_price,  # Trail (initial)
-            order.module, order.side, fees, 0.0,
+            order.module, order.side, fees, slippage_cost_usd,
             entry_idx=fill_idx  # Store bar index for performance
         )
         
@@ -3459,17 +3495,6 @@ class BacktestEngine:
         # Get position_id after adding position
         position_id = self.portfolio.positions[order.symbol].position_id if order.symbol in self.portfolio.positions else ""
         
-        # Calculate actual slippage_bps_applied from the fill
-        if order.side == 'LONG':
-            slippage_bps_applied = ((adjusted_price - order.trigger_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
-        else:  # SHORT
-            slippage_bps_applied = ((order.trigger_price - adjusted_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
-        
-        if not self.cost_model_enabled:
-            slippage_bps_applied = 0.0
-        
-        slippage_cost_usd = notional * (slippage_bps_applied / 10000.0)
-        
         # Record entry fill
         self._record_fill(
             position_id=position_id,
@@ -3479,7 +3504,7 @@ class BacktestEngine:
             leg='ENTRY',
             side='BUY' if order.side == 'LONG' else 'SELL',
             qty=adjusted_qty,
-            price=adjusted_price,
+            price=order.trigger_price,
             notional_usd=notional,
             slippage_bps_applied=slippage_bps_applied,
             slippage_cost_usd=slippage_cost_usd,
@@ -3501,7 +3526,7 @@ class BacktestEngine:
             leg='ENTRY',
             side='BUY' if order.side == 'LONG' else 'SELL',
             qty=adjusted_qty,
-            price=adjusted_price,
+            price=order.trigger_price,
             notional_usd=notional,
             fee_usd=fees,
             slippage_cost_usd=slippage_cost_usd,
@@ -3530,9 +3555,9 @@ class BacktestEngine:
             'side': order.side,
             'module': order.module,
             'qty': adjusted_qty,
-            'price': adjusted_price,
+            'price': order.trigger_price,
             'fees': fees,
-            'slip_bps': slippage_bps,
+            'slip_bps': slippage_bps_applied,
             'participation_pct': participation_pct,
             'post_only': post_only,
             'stop_dist': abs(adjusted_price - stop_price),
@@ -3733,6 +3758,16 @@ class BacktestEngine:
                 'error': error_msg
             })
             return
+
+        # ORACLE test module: allocate the full equity slice to the position so that
+        # buy-and-hold benchmarks track the naive close-to-close return.
+        if event.module == 'ORACLE':
+            step_size = contract_metadata.get('stepSize', 0.001)
+            min_qty = contract_metadata.get('minQty', 0.001)
+            min_notional = contract_metadata.get('minNotional', 5.0)
+            full_equity_qty = np.floor((self.portfolio.equity / adjusted_price) / step_size) * step_size
+            if full_equity_qty >= min_qty and full_equity_qty * adjusted_price >= min_notional:
+                adjusted_qty = full_equity_qty
         
         # Calculate slippage
         adv_60m = calculate_adv_60m(df['notional'], bar_idx)
@@ -3794,10 +3829,14 @@ class BacktestEngine:
             'post_only': post_only
         })
         
-        # Apply slippage to fill price
+        # Cost-model toggle removes fill-price slippage as well as fees
+        if not self.cost_model_enabled:
+            slippage_bps = 0.0
+        
+        # Apply slippage to the rounded intended entry price
         mid_price = (fill_bar['high'] + fill_bar['low']) / 2.0
         fill_price, gap_through = fill_stop_run(
-            entry_price, signal.side, fill_bar['high'], fill_bar['low'],
+            adjusted_price, signal.side, fill_bar['high'], fill_bar['low'],
             mid_price, slippage_bps
         )
         
@@ -3868,9 +3907,9 @@ class BacktestEngine:
                 pass
             return
         
-        # Calculate fees
+        # Calculate fees and slippage using the intended (tick-aligned) entry price
         # Stop-run entries are taker, unless post_only=True (maker)
-        notional = abs(adjusted_qty * fill_price)
+        notional = abs(adjusted_qty * adjusted_price)
         fill_is_taker = not post_only  # Taker unless post-only resting fill
         fee_bps = self.params.get_default('general', 'taker_fee_bps') if fill_is_taker else self.params.get_default('general', 'maker_fee_bps')
         if self.stress_fees:
@@ -3878,11 +3917,22 @@ class BacktestEngine:
             
         if not self.cost_model_enabled:
             fee_bps = 0.0
-            slippage_bps_applied = 0.0
+            slippage_bps = 0.0
             
         fees = notional * (fee_bps / 10000.0)
         
-        # Add position
+        # Actual slippage experienced relative to intended entry
+        if signal.side == 'LONG':
+            slippage_bps_applied = ((fill_price - adjusted_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
+        else:  # SHORT
+            slippage_bps_applied = ((adjusted_price - fill_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
+        
+        if not self.cost_model_enabled:
+            slippage_bps_applied = 0.0
+        
+        slippage_cost_usd = notional * (slippage_bps_applied / 10000.0)
+        
+        # Add position using intended entry price; costs already deducted from cash
         # OPTIMIZATION: Calculate and pass entry_idx to avoid future lookups
         df = self.symbol_data[event.symbol]
         if hasattr(self, 'symbol_ts_to_idx') and event.symbol in self.symbol_ts_to_idx:
@@ -3897,7 +3947,7 @@ class BacktestEngine:
                 entry_idx = -1
         
         if debug_oracle and event.module == 'ORACLE':
-            print(f"[ORACLE DEBUG] execute_entry: Adding position: symbol={event.symbol}, qty={adjusted_qty}, price={fill_price}, side={signal.side}")
+            print(f"[ORACLE DEBUG] execute_entry: Adding position: symbol={event.symbol}, qty={adjusted_qty}, price={entry_price}, side={signal.side}")
         # DeceptionModule signals carry the bot's exit lattice (TP1/TP2/TSL).
         # Pass them through to Position so collect_deception_exit_events can use them.
         deception_kwargs = {}
@@ -3911,9 +3961,9 @@ class BacktestEngine:
                 trap_type=signal.trap_type,
             )
         self.portfolio.add_position(
-            event.symbol, adjusted_qty, fill_price, fill_ts,
+            event.symbol, adjusted_qty, adjusted_price, fill_ts,
             effective_stop_price, effective_stop_price,  # Initial stop and trail
-            event.module, signal.side, fees, 0.0,
+            event.module, signal.side, fees, slippage_cost_usd,
             entry_idx=entry_idx,  # Store bar index for performance
             **deception_kwargs,
         )
@@ -3924,17 +3974,6 @@ class BacktestEngine:
         # Get position_id after adding position
         position_id = self.portfolio.positions[event.symbol].position_id if event.symbol in self.portfolio.positions else ""
         
-        # Calculate actual slippage_bps_applied from the fill
-        if signal.side == 'LONG':
-            slippage_bps_applied = ((fill_price - entry_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
-        else:  # SHORT
-            slippage_bps_applied = ((entry_price - fill_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
-        
-        if not self.cost_model_enabled:
-            slippage_bps_applied = 0.0
-        
-        slippage_cost_usd = notional * (slippage_bps_applied / 10000.0)
-        
         # Record entry fill
         self._record_fill(
             position_id=position_id,
@@ -3944,7 +3983,7 @@ class BacktestEngine:
             leg='ENTRY',
             side='BUY' if signal.side == 'LONG' else 'SELL',
             qty=adjusted_qty,
-            price=fill_price,
+            price=adjusted_price,
             notional_usd=notional,
             slippage_bps_applied=slippage_bps_applied,
             slippage_cost_usd=slippage_cost_usd,
@@ -3953,7 +3992,7 @@ class BacktestEngine:
             liquidity='maker' if post_only else 'taker',
             participation_pct=participation_pct,
             adv60_usd=adv_60m,
-            intended_price=entry_price
+            intended_price=adjusted_price
         )
         
         # Record ENTRY_FILL ledger event (cash decreases by fees + slippage)
@@ -3966,7 +4005,7 @@ class BacktestEngine:
             leg='ENTRY',
             side='BUY' if signal.side == 'LONG' else 'SELL',
             qty=adjusted_qty,
-            price=fill_price,
+            price=adjusted_price,
             notional_usd=notional,
             fee_usd=fees,
             slippage_cost_usd=slippage_cost_usd,
@@ -3999,7 +4038,7 @@ class BacktestEngine:
             'side': signal.side,
             'module': event.module,
             'qty': adjusted_qty,
-            'price': fill_price,
+            'price': adjusted_price,
             'fees': fees,
             'slip_bps': slippage_bps_applied,
             'participation_pct': participation_pct,
@@ -4084,8 +4123,9 @@ class BacktestEngine:
                     if fill_idx is not None and fill_idx < len(df):
                         current_bar = df.iloc[fill_idx]
                     else:
-                        # Fallback: use most recent bar
-                        current_bar = df.iloc[-1] if len(df) > 0 else None
+                        # Fallback: use most recent bar at or before fill_ts
+                        valid_df = df[df['ts'] <= fill_ts]
+                        current_bar = valid_df.iloc[-1] if len(valid_df) > 0 else None
                 else:
                     # Fallback: DataFrame lookup
                     current_bar = df[df['ts'] == fill_ts]
@@ -4097,7 +4137,7 @@ class BacktestEngine:
                         if len(current_bar) > 0:
                             current_bar = current_bar.iloc[-1]
                         else:
-                            current_bar = df.iloc[-1] if len(df) > 0 else None
+                            current_bar = None
             else:
                 current_bar = df.iloc[-1] if len(df) > 0 else None
             
@@ -4225,7 +4265,7 @@ class BacktestEngine:
                         'qty': pos.qty,
                         'price': current_price,
                         'fees': fees,
-                        'slip_bps': 0.0,
+                        'slip_bps': slippage_bps_applied,
                         'participation_pct': 0.0,
                         'post_only': False,
                         'stop_dist': abs(pos.entry_price - pos.stop_price),
@@ -4539,7 +4579,7 @@ class BacktestEngine:
         return True
     
     def apply_funding_costs(self, symbol: str, current_ts: pd.Timestamp):
-        """Apply funding costs (adverse only) - FIX 4: Only at exact funding times (00:00, 08:00, 16:00 UTC)"""
+        """Apply signed funding costs at Binance USD-M funding times (00:00, 08:00, 16:00 UTC)."""
         if symbol not in self.portfolio.positions:
             return
         
@@ -4549,14 +4589,12 @@ class BacktestEngine:
         if funding_df is None or len(funding_df) == 0:
             return
         
-        # FIX 4: Only accrue funding at exact funding times: 00:00, 08:00, 16:00 UTC
-        # Check if current_ts is exactly at a funding time (exact match required)
+        # Only accrue funding at exact funding times: 00:00, 08:00, 16:00 UTC
         current_hour = current_ts.hour
         current_minute = current_ts.minute
         current_second = current_ts.second
         
-        # Funding times are exactly at 00:00:00, 08:00:00, 16:00:00 UTC
-        funding_times = [0, 8, 16]  # 00:00, 08:00, 16:00 UTC
+        funding_times = [0, 8, 16]
         is_funding_time = (
             current_hour in funding_times and
             current_minute == 0 and
@@ -4564,24 +4602,39 @@ class BacktestEngine:
         )
         
         if not is_funding_time:
-            return  # Skip funding accrual if not at exact funding time
+            return
         
-        # Find funding rate for this exact time
+        # Find the most recent funding rate published at or before current_ts
         funding_match = funding_df[funding_df['funding_ts'] <= current_ts]
         if len(funding_match) == 0:
             return
         
-        # Get the funding rate for the most recent funding event
         funding_rate = funding_match.iloc[-1]['funding_rate']
-        notional = abs(pos.qty * pos.entry_price)
         
-        # FIX 4: Apply adverse funding only (long pays when rate>0, short pays when rate<0)
-        cost = self.portfolio.calculate_funding_cost(symbol, funding_rate, notional)
+        # Use current mark price (close of the bar at current_ts) for funding notional
+        df = self.symbol_data.get(symbol)
+        if df is not None and len(df) > 0:
+            if hasattr(self, 'symbol_ts_to_idx') and symbol in self.symbol_ts_to_idx:
+                bar_idx = self.symbol_ts_to_idx[symbol].get(current_ts, None)
+            else:
+                bar_match = df[df['ts'] == current_ts]
+                bar_idx = bar_match.index[0] if len(bar_match) > 0 else None
+            if bar_idx is not None and 0 <= bar_idx < len(df):
+                mark_price = df.iloc[bar_idx]['close']
+            else:
+                valid_df = df[df['ts'] <= current_ts]
+                mark_price = valid_df.iloc[-1]['close'] if len(valid_df) > 0 else pos.entry_price
+        else:
+            mark_price = pos.entry_price
+        
+        notional = abs(pos.qty * mark_price)
         
         if not self.cost_model_enabled:
-            cost = 0.0
-            
-        if cost > 0:
+            return
+        
+        cost = self.portfolio.calculate_funding_cost(symbol, funding_rate, notional)
+        
+        if cost != 0.0:
             self.forensic_log.append({
                 'ts': current_ts,
                 'symbol': symbol,
@@ -4590,26 +4643,24 @@ class BacktestEngine:
                 'cost': cost,
                 'position_id': pos.position_id
             })
-            # FIX 4: Count funding event only if position is open and cost > 0
             self.funding_events_count += 1
             
-            # Record FUNDING ledger event (cash decreases by funding cost)
             self._record_ledger_event(
                 ts=current_ts,
                 event='FUNDING',
                 position_id=pos.position_id,
                 symbol=symbol,
                 module=pos.module,
-                leg='',  # Funding is not a fill leg
+                leg='',
                 side=pos.side,
                 qty=pos.qty,
-                price=pos.entry_price,  # Use entry price for reference
+                price=mark_price,
                 notional_usd=notional,
                 fee_usd=0.0,
                 slippage_cost_usd=0.0,
                 funding_usd=cost,
-                cash_delta_usd=-cost,  # Funding always decreases cash
-                note=f"Funding cost: rate={funding_rate:.6f}"
+                cash_delta_usd=-cost,
+                note=f"Funding: rate={funding_rate:.6f}, cost={cost:.6f}"
             )
     
     def _check_invariants(self, current_ts: pd.Timestamp, symbol_prices: Optional[Dict[str, float]] = None):

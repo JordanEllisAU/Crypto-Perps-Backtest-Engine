@@ -49,7 +49,7 @@ class EventSequencer:
         sorted_events = sorted(
             events,
             key=lambda e: (
-                priority_map.get(e.event_type, 999),
+                priority_map.get(e.event_type, e.priority),
                 e.signal_ts if e.signal_ts is not None else pd.Timestamp.max
             )
         )

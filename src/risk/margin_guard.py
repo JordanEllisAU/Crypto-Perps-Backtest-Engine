@@ -20,13 +20,17 @@ def calculate_margin_ratio(
     for pos in positions.values():
         if hasattr(pos, 'qty'):
             # Position object
+            module = pos.module if hasattr(pos, 'module') else ''
             qty = pos.qty
             entry_price = pos.entry_price
         elif isinstance(pos, dict):
             # Dict
+            module = pos.get('module', '')
             qty = pos.get('qty', 0)
             entry_price = pos.get('entry_price', 0)
         else:
+            continue
+        if module == 'ORACLE':
             continue
         total_notional += abs(qty * entry_price)
     
