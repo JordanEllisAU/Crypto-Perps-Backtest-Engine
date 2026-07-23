@@ -284,19 +284,18 @@ class PortfolioState:
         funding_rate: float,
         notional: float
     ) -> float:
-        """Calculate and apply funding cost (adverse only)"""
+        """Calculate and apply signed funding cost (positive = paid, negative = received)."""
         if symbol not in self.positions:
             return 0.0
         
         position = self.positions[symbol]
         
-        # Only pay funding if adverse (long pays when rate > 0, short pays when rate < 0)
-        if position.side == 'LONG' and funding_rate > 0:
+        # Binance USD-M convention: positive rate -> longs pay shorts.
+        # LONG cost = notional * rate; SHORT cost = -notional * rate.
+        if position.side == 'LONG':
             cost = notional * funding_rate
-        elif position.side == 'SHORT' and funding_rate < 0:
-            cost = abs(notional * funding_rate)
         else:
-            cost = 0.0
+            cost = -notional * funding_rate
         
         self.funding_paid += cost
         self.cash -= cost
