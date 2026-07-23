@@ -353,18 +353,30 @@ class BacktestEngine:
                 idx = self.symbol_ts_to_idx[symbol][current_ts]
                 df = self.symbol_data[symbol]
                 
-                # Process bar t+1 (order execution) - use current bar
+                # Determine the fill bar. If the next bar lies beyond the user-supplied end_ts,
+                # fall back to the current bar (signals generated at this close would otherwise
+                # be filled with future price action outside the run window).
                 if idx < len(df) - 1:
                     next_idx = idx + 1
                     next_ts = df['ts'].iloc[next_idx]
-                    self.process_bar_t_plus_1(symbol, idx, next_idx, next_ts)
-                    if execution_ts is None:
-                        execution_ts = next_ts
+                    if next_ts > end_ts:
+                        # Don't fill beyond the requested end; drop any signals generated for
+                        # a future bar that will not occur inside the run window.
+                        if symbol in self.symbol_pending_signals:
+                            self.symbol_pending_signals[symbol] = [
+                                sig for sig in self.symbol_pending_signals[symbol]
+                                if getattr(sig, 'signal_ts', pd.Timestamp.min) < current_ts
+                            ]
+                        next_idx = idx
+                        next_ts = current_ts
                 else:
-                    # Last bar - still process t+1 with current bar as fill bar
-                    self.process_bar_t_plus_1(symbol, idx, idx, current_ts)
-                    if execution_ts is None:
-                        execution_ts = current_ts
+                    next_idx = idx
+                    next_ts = current_ts
+                
+                # Process bar t+1 (order execution) - use current bar
+                self.process_bar_t_plus_1(symbol, idx, next_idx, next_ts)
+                if execution_ts is None:
+                    execution_ts = next_ts
             
             # Use the execution timestamp for equity marks so the equity curve aligns with the
             # bar on which orders are filled, not the signal bar.
