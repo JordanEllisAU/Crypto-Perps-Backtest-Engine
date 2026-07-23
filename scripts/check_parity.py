@@ -113,17 +113,23 @@ def check_parity(metrics_path: Path, replay_path: Path, output_path: Path):
         if trades_path.exists():
             engine_trades_df = pd.read_csv(trades_path)
             replay_trades_list = replay_results['trades']
-            
-            if len(engine_trades_df) == len(replay_trades_list):
+            # Match by position_id to avoid order-dependence when multiple trades
+            # close at the same timestamp.
+            replay_by_id = {t.get('position_id', ''): t for t in replay_trades_list}
+            engine_by_id = {r.get('position_id', ''): r for _, r in engine_trades_df.iterrows()}
+            common_ids = set(replay_by_id.keys()) & set(engine_by_id.keys())
+
+            if common_ids:
                 max_per_trade_diff_bps = 0.0
-                for i, replay_trade in enumerate(replay_trades_list):
-                    engine_trade = engine_trades_df.iloc[i]
-                    pnl_diff = abs(engine_trade.get('pnl_net_usd', 0.0) - replay_trade.get('pnl', 0.0))
-                    notional = abs(engine_trade.get('notional_entry_usd', 0.0) + engine_trade.get('notional_exit_usd', 0.0))
+                for pid in common_ids:
+                    engine_trade = engine_by_id[pid]
+                    replay_trade = replay_by_id[pid]
+                    pnl_diff = abs(float(engine_trade.get('pnl_net_usd', 0.0)) - float(replay_trade.get('pnl', 0.0)))
+                    notional = abs(float(engine_trade.get('notional_entry_usd', 0.0)) + float(engine_trade.get('notional_exit_usd', 0.0)))
                     if notional > 0:
                         diff_bps = (pnl_diff / notional) * 10000
                         max_per_trade_diff_bps = max(max_per_trade_diff_bps, diff_bps)
-                
+
                 comparisons.append({
                     'metric': 'per_trade_pnl_max_diff',
                     'max_diff_bps_notional': max_per_trade_diff_bps,

@@ -304,6 +304,17 @@ class BacktestEngine:
             import sys
             sys.stdout.write(f"[ORACLE DEBUG] run: Starting main loop, time_index length={len(time_index)}, symbols={symbols}\n")
             sys.stdout.flush()
+
+        # Seed equity curve with the initial state (before any executions)
+        self.equity_curve.append({
+            'ts': start_ts,
+            'equity': self.portfolio.equity,
+            'drawdown': self.portfolio.max_drawdown,
+            'drawdown_pct': self.portfolio.max_drawdown_pct,
+            'daily_pnl': 0.0
+        })
+        self.last_equity = self.portfolio.equity
+
         for bar_idx, current_ts in enumerate(time_index):
             # Process each symbol for signal generation (bar t)
             for symbol in symbols:
@@ -330,6 +341,7 @@ class BacktestEngine:
                     self.process_bar_t(symbol, 0, current_ts)
             
             # Process each symbol for order execution (bar t+1)
+            execution_ts = None  # The timestamp at which fills actually occur this bar
             for symbol in symbols:
                 if symbol not in self.symbol_data or symbol not in self.symbol_ts_to_idx:
                     continue
@@ -346,9 +358,18 @@ class BacktestEngine:
                     next_idx = idx + 1
                     next_ts = df['ts'].iloc[next_idx]
                     self.process_bar_t_plus_1(symbol, idx, next_idx, next_ts)
+                    if execution_ts is None:
+                        execution_ts = next_ts
                 else:
                     # Last bar - still process t+1 with current bar as fill bar
                     self.process_bar_t_plus_1(symbol, idx, idx, current_ts)
+                    if execution_ts is None:
+                        execution_ts = current_ts
+            
+            # Use the execution timestamp for equity marks so the equity curve aligns with the
+            # bar on which orders are filled, not the signal bar.
+            if execution_ts is None:
+                execution_ts = current_ts
             
             # Track VACUUM/THIN dwell (once per bar, across all symbols)
             for symbol in symbols:
@@ -362,27 +383,27 @@ class BacktestEngine:
             self.total_bars_processed += len(symbols)  # Count per symbol-bar
             
             # Update equity ONCE per bar for all positions (after all symbols processed)
-            # This ensures all positions use correct prices simultaneously
+            # Mark to the execution bar so the equity curve timestamps match fill timestamps.
             if self.portfolio.positions:
                 symbol_prices = {}
                 for pos_symbol in self.portfolio.positions.keys():
                     if pos_symbol in self.symbol_data and pos_symbol in self.symbol_ts_to_idx:
                         # OPTIMIZATION: Use O(1) lookup instead of O(n) filter
-                        if current_ts in self.symbol_ts_to_idx[pos_symbol]:
-                            idx = self.symbol_ts_to_idx[pos_symbol][current_ts]
+                        if execution_ts in self.symbol_ts_to_idx[pos_symbol]:
+                            idx = self.symbol_ts_to_idx[pos_symbol][execution_ts]
                             pos_df = self.symbol_data[pos_symbol]
                             symbol_prices[pos_symbol] = pos_df['close'].iloc[idx]
                         else:
-                            # Fallback: use most recent bar up to current_ts
+                            # Fallback: use most recent bar up to execution_ts
                             pos_df = self.symbol_data[pos_symbol]
-                            pos_before = pos_df[pos_df['ts'] <= current_ts]
+                            pos_before = pos_df[pos_df['ts'] <= execution_ts]
                             if len(pos_before) > 0:
                                 symbol_prices[pos_symbol] = pos_before.iloc[-1]['close']
-                
+
                 # Update equity once with all symbol prices
                 if symbol_prices and len(symbol_prices) == len(self.portfolio.positions):
                     # Only update if we have prices for all positions
-                    self.portfolio.update_equity_all_positions(symbol_prices, current_ts)
+                    self.portfolio.update_equity_all_positions(symbol_prices, execution_ts)
                 elif len(self.portfolio.positions) == 0:
                     # If no positions, equity should equal cash (unrealized PnL = 0)
                     self.portfolio.equity = self.portfolio.cash
@@ -390,8 +411,8 @@ class BacktestEngine:
                     # Partial prices - update what we can
                     partial_prices = {k: v for k, v in symbol_prices.items() if k in self.portfolio.positions}
                     if partial_prices:
-                        self.portfolio.update_equity_all_positions(partial_prices, current_ts)
-                
+                        self.portfolio.update_equity_all_positions(partial_prices, execution_ts)
+
                 # Update per-symbol mark-to-market for intraday loss halts
                 for pos_symbol, position in self.portfolio.positions.items():
                     current_price = symbol_prices.get(pos_symbol)
@@ -405,11 +426,11 @@ class BacktestEngine:
                         pnl_delta = -price_delta * position.qty
                     self.symbol_daily_pnl[pos_symbol] += pnl_delta
                     self.symbol_prev_prices[pos_symbol] = current_price
-                
+
                 # Check invariants after equity update (if debug enabled)
                 if self.debug_invariants and symbol_prices:
-                    self._check_invariants(current_ts, symbol_prices)
-            
+                    self._check_invariants(execution_ts, symbol_prices)
+
             # Track portfolio returns for ES guardrails (even when no positions)
             if self.last_equity > 0:
                 ret = (self.portfolio.equity - self.last_equity) / self.last_equity
@@ -605,7 +626,7 @@ class BacktestEngine:
             
             # Record equity curve once per bar (even when no positions)
             self.equity_curve.append({
-                'ts': current_ts,
+                'ts': execution_ts,
                 'equity': self.portfolio.equity,
                 'drawdown': self.portfolio.max_drawdown,
                 'drawdown_pct': self.portfolio.max_drawdown_pct,
@@ -3759,13 +3780,21 @@ class BacktestEngine:
             })
             return
 
-        # ORACLE test module: allocate the full equity slice to the position so that
-        # buy-and-hold benchmarks track the naive close-to-close return.
+        # ORACLE test module: size to the full equity slice when allowed by ES guardrails,
+        # otherwise scale down to the maximum risk the current ES cap permits. This lets
+        # buy-and-hold benchmarks track the naive close-to-close return without tripping
+        # the ES guard on default risk parameters.
         if event.module == 'ORACLE':
             step_size = contract_metadata.get('stepSize', 0.001)
             min_qty = contract_metadata.get('minQty', 0.001)
             min_notional = contract_metadata.get('minNotional', 5.0)
             full_equity_qty = np.floor((self.portfolio.equity / adjusted_price) / step_size) * step_size
+            # Respect ES cap: candidate_risk = qty * |entry - stop| must fit within es_cap_of_equity * equity
+            es_cap_pct = self.params.get('es_guardrails', 'es_cap_of_equity') or 0.0225
+            stop_distance_for_oracle = abs(adjusted_price - signal.stop_price)
+            if stop_distance_for_oracle > 0:
+                es_capped_qty = (self.portfolio.equity * es_cap_pct * 0.95) / stop_distance_for_oracle
+                full_equity_qty = min(full_equity_qty, np.floor((es_capped_qty / step_size)) * step_size)
             if full_equity_qty >= min_qty and full_equity_qty * adjusted_price >= min_notional:
                 adjusted_qty = full_equity_qty
         

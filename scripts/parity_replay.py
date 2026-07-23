@@ -46,25 +46,18 @@ def replay_pnl(signals_path: Path, initial_capital: float = 100000.0, funding_da
         slippage_cost_usd = fill.get('slippage_cost_usd', 0.0)
         
         # Open position
-        if side == 'BUY':
-            # Long entry
-            positions[position_id] = {
-                'entry_price': price,
-                'qty': qty,
-                'side': 'LONG',
-                'entry_ts': fill['ts']
-            }
-        else:  # SELL
-            # Short entry
-            positions[position_id] = {
-                'entry_price': price,
-                'qty': qty,
-                'side': 'SHORT',
-                'entry_ts': fill['ts']
-            }
+        pos_record = {
+            'entry_price': price,
+            'qty': qty,
+            'side': 'LONG' if side == 'BUY' else 'SHORT',
+            'entry_ts': fill['ts'],
+            'entry_fees': fee_usd,
+            'entry_slippage': slippage_cost_usd,
+        }
+        positions[position_id] = pos_record
         
-        # Pay fees and slippage
-        cash -= fee_usd + slippage_cost_usd
+        # Track entry costs separately; cash is only adjusted on closed PnL so that
+        # final equity equals initial capital + round-trip net PnL.
         total_fees += fee_usd
         total_slippage += slippage_cost_usd
     
@@ -83,16 +76,19 @@ def replay_pnl(signals_path: Path, initial_capital: float = 100000.0, funding_da
         
         pos = positions[position_id]
         
-        # Calculate PnL
+        # Calculate gross PnL
         if pos['side'] == 'LONG':
             pnl = (price - pos['entry_price']) * pos['qty']
         else:  # SHORT
             pnl = (pos['entry_price'] - price) * pos['qty']
         
-        # Deduct fees and slippage
-        pnl -= fee_usd + slippage_cost_usd
+        # Round-trip net PnL = gross - (entry + exit fees and slippage)
+        total_trade_costs = (
+            pos['entry_fees'] + pos['entry_slippage'] + fee_usd + slippage_cost_usd
+        )
+        pnl -= total_trade_costs
         
-        # Update cash
+        # Update cash and PnL
         cash += pnl
         total_pnl += pnl
         total_fees += fee_usd
@@ -106,8 +102,8 @@ def replay_pnl(signals_path: Path, initial_capital: float = 100000.0, funding_da
             'exit_price': price,
             'qty': pos['qty'],
             'pnl': pnl,
-            'fees': fee_usd,
-            'slippage': slippage_cost_usd
+            'fees': total_trade_costs,
+            'slippage': pos['entry_slippage'] + slippage_cost_usd
         })
         
         # Remove position
