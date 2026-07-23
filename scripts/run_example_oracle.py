@@ -6,6 +6,7 @@ This script loads toy UP market data and validates that PnL > 0.
 """
 import sys
 from pathlib import Path
+import numpy as np
 import pandas as pd
 
 # Add engine_core to path
@@ -25,6 +26,7 @@ def main():
     
     tmp_dir = Path(tempfile.mkdtemp())
     start_ts = pd.Timestamp('2021-01-01 00:00:00', tz='UTC')
+    np.random.seed(42)
     up_market = generate_toy_market('UP', start_ts, num_bars=100, base_price=50000.0)
     markets = {'BTCUSDT': up_market}
     data_loader = create_toy_data_loader(markets, tmp_dir)

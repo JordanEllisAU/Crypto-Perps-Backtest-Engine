@@ -1583,7 +1583,11 @@ class ReportGenerator:
         
         # Rebuild equity.csv from ledger for consistency
         df_equity_curve = pd.DataFrame(equity_curve)
-        df_equity_curve['ts'] = pd.to_datetime(df_equity_curve['ts'])
+        if not df_equity_curve.empty:
+            df_equity_curve['ts'] = pd.to_datetime(df_equity_curve['ts'])
+            # If two equity marks share the same timestamp, keep the latest state
+            # (can happen at the last bar when both signal-bar and execution-bar resolve to it)
+            df_equity_curve = df_equity_curve.drop_duplicates(subset=['ts'], keep='last')
         
         df_ledger['ts'] = pd.to_datetime(df_ledger['ts'])
         
