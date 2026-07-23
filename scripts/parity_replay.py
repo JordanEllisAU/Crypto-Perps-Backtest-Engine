@@ -45,24 +45,18 @@ def replay_pnl(signals_path: Path, initial_capital: float = 100000.0, funding_da
         fee_usd = fill.get('fee_usd', 0.0)
         slippage_cost_usd = fill.get('slippage_cost_usd', 0.0)
         
-        # Open position
-        if side == 'BUY':
-            # Long entry
-            positions[position_id] = {
-                'entry_price': price,
-                'qty': qty,
-                'side': 'LONG',
-                'entry_ts': fill['ts']
-            }
-        else:  # SELL
-            # Short entry
-            positions[position_id] = {
-                'entry_price': price,
-                'qty': qty,
-                'side': 'SHORT',
-                'entry_ts': fill['ts']
-            }
-        
+        # Open position. Retain the entry-leg fee/slippage so the per-trade
+        # PnL recorded at close is net of BOTH legs (matching the engine's
+        # pnl_net_usd definition); cash still deducts entry costs here.
+        positions[position_id] = {
+            'entry_price': price,
+            'qty': qty,
+            'side': 'LONG' if side == 'BUY' else 'SHORT',
+            'entry_ts': fill['ts'],
+            'entry_fee_usd': fee_usd,
+            'entry_slippage_cost_usd': slippage_cost_usd,
+        }
+
         # Pay fees and slippage
         cash -= fee_usd + slippage_cost_usd
         total_fees += fee_usd
@@ -82,22 +76,26 @@ def replay_pnl(signals_path: Path, initial_capital: float = 100000.0, funding_da
             continue  # Skip if position not found
         
         pos = positions[position_id]
-        
-        # Calculate PnL
+
+        # Calculate gross PnL
         if pos['side'] == 'LONG':
-            pnl = (price - pos['entry_price']) * pos['qty']
+            gross_pnl = (price - pos['entry_price']) * pos['qty']
         else:  # SHORT
-            pnl = (pos['entry_price'] - price) * pos['qty']
-        
-        # Deduct fees and slippage
-        pnl -= fee_usd + slippage_cost_usd
-        
-        # Update cash
-        cash += pnl
-        total_pnl += pnl
+            gross_pnl = (pos['entry_price'] - price) * pos['qty']
+
+        # Cash only deducts the exit-leg costs here; the entry-leg costs were
+        # already removed from cash when the position opened.
+        exit_costs = fee_usd + slippage_cost_usd
+        cash += gross_pnl - exit_costs
+
+        # Per-trade PnL is net of BOTH legs so it matches the engine's
+        # pnl_net_usd. Summed across trades this equals final_equity - initial.
+        entry_costs = pos.get('entry_fee_usd', 0.0) + pos.get('entry_slippage_cost_usd', 0.0)
+        net_pnl = gross_pnl - exit_costs - entry_costs
+        total_pnl += net_pnl
         total_fees += fee_usd
         total_slippage += slippage_cost_usd
-        
+
         # Record trade
         trades.append({
             'position_id': position_id,
@@ -105,9 +103,9 @@ def replay_pnl(signals_path: Path, initial_capital: float = 100000.0, funding_da
             'entry_price': pos['entry_price'],
             'exit_price': price,
             'qty': pos['qty'],
-            'pnl': pnl,
-            'fees': fee_usd,
-            'slippage': slippage_cost_usd
+            'pnl': net_pnl,
+            'fees': fee_usd + pos.get('entry_fee_usd', 0.0),
+            'slippage': slippage_cost_usd + pos.get('entry_slippage_cost_usd', 0.0)
         })
         
         # Remove position

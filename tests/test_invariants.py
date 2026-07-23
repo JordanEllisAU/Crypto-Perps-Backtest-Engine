@@ -99,23 +99,29 @@ class TestInvariants:
         assert hasattr(engine, '_passes_es_guard')
         
     def test_tie_breaker_oldest_signal_when_one_slot_left(self, params, data_loader):
-        """Test: when one slot remains, choose oldest signal_ts"""
+        """Test: when one slot remains, choose oldest signal_ts.
+
+        Model-1 is strategy-agnostic: the sequencer ranks by event-type
+        priority, then breaks ties by oldest signal_ts. Two entries of the same
+        event type (ORACLE_ENTRY) share a priority, so the older signal_ts wins.
+        """
         from src.execution.sequencing import EventSequencer, OrderEvent
-        
+
         sequencer = EventSequencer()
-        
-        # Create events with different signal_ts
+
+        # Two same-priority entries with different signal_ts (order_id
+        # distinguishes them since event_type/priority are identical).
         events = [
-            OrderEvent('TREND_ENTRY', 'BTCUSDT', 'TREND', 3, signal_ts=pd.Timestamp('2022-01-01 10:00:00', tz='UTC')),
-            OrderEvent('RANGE_ENTRY', 'BTCUSDT', 'RANGE', 4, signal_ts=pd.Timestamp('2022-01-01 09:00:00', tz='UTC')),
+            OrderEvent('ORACLE_ENTRY', 'BTCUSDT', 'ORACLE', 2, signal_ts=pd.Timestamp('2022-01-01 10:00:00', tz='UTC'), order_id='newer'),
+            OrderEvent('ORACLE_ENTRY', 'BTCUSDT', 'ORACLE', 2, signal_ts=pd.Timestamp('2022-01-01 09:00:00', tz='UTC'), order_id='older'),
         ]
-        
+
         # Sequence events
         sequenced = sequencer.sequence_events(events)
-        
-        # Verify oldest signal_ts comes first (within same priority, but priorities differ)
-        # TREND has priority 3, RANGE has priority 4, so TREND should come first
-        assert sequenced[0].event_type == 'TREND_ENTRY'
+
+        # Tie-breaker: oldest signal_ts (09:00) comes first.
+        assert sequenced[0].order_id == 'older'
+        assert sequenced[0].signal_ts == pd.Timestamp('2022-01-01 09:00:00', tz='UTC')
         
     def test_stale_cancel_does_not_cancel_oco_exits(self, params, data_loader):
         """Test: stale entry >3 bars cancels without touching OCO exits"""
