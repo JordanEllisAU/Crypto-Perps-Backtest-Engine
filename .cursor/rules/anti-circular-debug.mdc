@@ -1,0 +1,43 @@
+# anti-circular-debug
+
+**Scope:** All agent work in this repository.
+
+These directives are mandatory. They replace Taskmaster/GitHub Actions slop and prevent circular debugging.
+
+## 1. Stop on a blocker, do not loop
+
+- If a command fails three times with the same error, change the hypothesis before running it again.
+- Do not re-run lint/test/build gates as a ritual. Read the output and fix the cause.
+- Platform-level failures (e.g., GitHub Actions `startup_failure`, API 403) are reported with `report_blocker` and `message_user`. Do not create more PRs hoping the issue clears.
+
+## 2. Run the repo's local gates before every commit
+
+Identify the project's lint/test/build commands (e.g., `make ci`, `npm test`, `pytest`, `npm run build`) and run them before committing. If a gate fails, fix it. Do not commit with `--no-verify`.
+
+## 3. No unstructured logging in gate scripts
+
+Use a shared logger or structured logging in any validation/build/reporting script. Bare `print()` / `console.log()` / `printf()` in gate scripts is forbidden.
+
+## 4. Generated files must be deterministic
+
+- No timestamps or random values in build outputs.
+- Strip trailing whitespace in generated text files.
+- Do not stage regenerated artifacts unless the source of truth changed.
+
+## 5. Do not modify tests to pass
+
+If a test fails because the code is wrong, fix the code. If the test requires a runtime that is not present, add a `skipif` / `skip` marker with a reason.
+
+## 6. Use feature branches and PRs
+
+- Branch from the default branch.
+- Never `git reset --hard` on the default branch or `main`.
+- Open a PR for any non-trivial change.
+
+## 7. No session/chat artifacts in commits
+
+Ignore and never commit: `.claude/*.json`, `.taskmaster/`, `.vscode/`, `.playwright-mcp/`, `.cursor/learning/`, scratch files, chat logs, or any file produced by an IDE/session tool.
+
+## 8. Document root cause, not just the fix
+
+When a bug is fixed, update the project log or `AGENTS.md` / `CLAUDE.md` with symptom, root cause, fix, and verification command. This prevents the same bug from being re-introduced.
