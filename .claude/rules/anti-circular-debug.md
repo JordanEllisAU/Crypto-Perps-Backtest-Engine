@@ -2,7 +2,7 @@
 
 **Applies to:** All agent work in this repository.
 
-These directives are mandatory. They replace Taskmaster/GitHub Actions slop and prevent circular debugging.
+These directives are mandatory. They replace ad-hoc orchestration tooling and prevent circular debugging.
 
 ## Stop on a blocker, do not loop
 
@@ -36,7 +36,7 @@ Fix the code, or add a `skipif` / `skip` marker with a reason if a runtime is mi
 
 ## No session/chat artifacts in commits
 
-Ignore and never commit `.claude/*.json`, `.taskmaster/`, `.vscode/`, `.playwright-mcp/`, `.cursor/learning/`, scratch files, or chat logs.
+Ignore and never commit `.claude/*.json`, `.vscode/`, `.playwright-mcp/`, `.cursor/learning/`, scratch files, or chat logs.
 
 ## Document root cause, not just the fix
 
