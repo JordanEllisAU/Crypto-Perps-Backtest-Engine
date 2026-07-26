@@ -1,7 +1,10 @@
 """Margin guard: cross-margin ratio gates"""
+import logging
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
 from engine_core.src.risk.logging import log_risk_event
+
+LOGGER = logging.getLogger(__name__)
 
 
 def calculate_margin_ratio(
@@ -155,11 +158,17 @@ def trim_with_deadlock_safety(
     margin_ratio_before = calculate_margin_ratio(positions, equity)
     
     # Log initial state
-    print(f"[TRIM_DEADLOCK_SAFETY] Starting trim loop: margin_ratio={margin_ratio_before:.4f}, trim_threshold={trim_threshold:.4f}, max_trim_count={max_trim_count}")
+    LOGGER.info(
+        "Starting trim loop: margin_ratio=%.4f, trim_threshold=%.4f, max_trim_count=%s",
+        margin_ratio_before, trim_threshold, max_trim_count
+    )
     
     # Early exit: if margin_ratio < trim_threshold, no action needed
     if margin_ratio_before < trim_threshold:
-        print(f"[TRIM_DEADLOCK_SAFETY] Margin ratio {margin_ratio_before:.4f} below threshold {trim_threshold:.4f}, no trim needed")
+        LOGGER.info(
+            "Margin ratio %.4f below threshold %.4f, no trim needed",
+            margin_ratio_before, trim_threshold
+        )
         return False, 0, margin_ratio_before, margin_ratio_before
     
     # Bounded loop: while margin_ratio >= trim_threshold AND trim_count < max_trim_count
@@ -168,7 +177,7 @@ def trim_with_deadlock_safety(
         # Get trim precedence
         pos_list = get_trim_precedence(positions, es_contributions)
         if len(pos_list) == 0:
-            print(f"[TRIM_DEADLOCK_SAFETY] No positions to trim")
+            LOGGER.info("No positions to trim")
             break
         
         # Close largest position (simplified: close entire position, one at a time)
@@ -191,7 +200,7 @@ def trim_with_deadlock_safety(
         if close_position_callback:
             closed = close_position_callback(symbol_to_close)
             if not closed:
-                print(f"[TRIM_DEADLOCK_SAFETY] Close callback failed for {symbol_to_close}, treating as deadlock")
+                LOGGER.warning("Close callback failed for %s, treating as deadlock", symbol_to_close)
                 break  # Treat callback failure as deadlock - break and check if we should flatten
         else:
             # Default: remove from positions dict (simplified - actual engine should handle this properly)
@@ -202,7 +211,10 @@ def trim_with_deadlock_safety(
         # Recalculate margin ratio with updated positions
         current_margin_ratio = calculate_margin_ratio(positions, equity)
         
-        print(f"[TRIM_DEADLOCK_SAFETY] Trim #{trim_count}: Closed {symbol_to_close} (qty={current_qty:.6f}), margin_ratio={current_margin_ratio:.4f}")
+        LOGGER.info(
+            "Trim #%s: Closed %s (qty=%.6f), margin_ratio=%.4f",
+            trim_count, symbol_to_close, current_qty, current_margin_ratio
+        )
     
     # After loop: check if still breached
     margin_ratio_after = calculate_margin_ratio(positions, equity)
@@ -212,7 +224,10 @@ def trim_with_deadlock_safety(
     if margin_ratio_after >= trim_threshold:
         if trim_flatten_on_fail:
             should_flatten = True
-            print(f"[TRIM_DEADLOCK_SAFETY] DEADLOCK: After {trim_count} trims, margin_ratio={margin_ratio_after:.4f} still breaches threshold {trim_threshold:.4f}. FLATTEN required.")
+            LOGGER.warning(
+                "DEADLOCK: After %s trims, margin_ratio=%.4f still breaches threshold %.4f. FLATTEN required.",
+                trim_count, margin_ratio_after, trim_threshold
+            )
             # Launch Punch List – Quick Win #1: structured risk logging
             log_risk_event(
                 'trim_fail',
@@ -226,7 +241,10 @@ def trim_with_deadlock_safety(
                 }
             )
         else:
-            print(f"[TRIM_DEADLOCK_SAFETY] WARNING: After {trim_count} trims, margin_ratio={margin_ratio_after:.4f} still breaches threshold {trim_threshold:.4f}, but flatten_on_fail=False")
+            LOGGER.warning(
+                "After %s trims, margin_ratio=%.4f still breaches threshold %.4f, but flatten_on_fail=False",
+                trim_count, margin_ratio_after, trim_threshold
+            )
             # Launch Punch List – Quick Win #1: structured risk logging
             log_risk_event(
                 'trim_fail',
@@ -240,7 +258,10 @@ def trim_with_deadlock_safety(
                 }
             )
     else:
-        print(f"[TRIM_DEADLOCK_SAFETY] Trim loop resolved after {trim_count} trims: margin_ratio={margin_ratio_after:.4f} < threshold {trim_threshold:.4f}")
+        LOGGER.info(
+            "Trim loop resolved after %s trims: margin_ratio=%.4f < threshold %.4f",
+            trim_count, margin_ratio_after, trim_threshold
+        )
     
     return should_flatten, trim_count, margin_ratio_before, margin_ratio_after
 

@@ -1,4 +1,5 @@
 """Report generation: CSV/JSON outputs"""
+import logging
 import pandas as pd
 import json
 from pathlib import Path
@@ -7,6 +8,8 @@ from dataclasses import dataclass
 import numpy as np
 from datetime import datetime, UTC
 import hashlib
+
+LOGGER = logging.getLogger(__name__)
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -1788,7 +1791,7 @@ class ReportGenerator:
                 table = pa.Table.from_pandas(df)
                 pq.write_table(table, self.artifacts_dir / 'fills.parquet')
             except Exception as e:
-                print(f"Warning: Could not write fills.parquet: {e}")
+                LOGGER.warning("Could not write fills.parquet: %s", e)
     
     def _write_ledger_artifact(self, ledger: List[Dict]):
         """Write artifacts/ledger.csv: cash-affecting events"""
@@ -2243,7 +2246,7 @@ class ReportGenerator:
                     output_path = self.artifacts_dir / 'opportunity_audit.parquet'
                     pq.write_table(table, output_path)
                 except Exception as e:
-                    print(f"Warning: Could not write opportunity_audit.parquet: {e}")
+                    LOGGER.warning("Could not write opportunity_audit.parquet: %s", e)
             else:
                 # Fallback to CSV if parquet not available
                 df_audit.to_csv(self.artifacts_dir / 'opportunity_audit.csv', index=False)
