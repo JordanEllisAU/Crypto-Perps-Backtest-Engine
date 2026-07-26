@@ -1,6 +1,6 @@
 # Crypto-Perps-Backtest-Engine — local CI gate.
 
-PYTHON ?= .venv/bin/python
+PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
 .PHONY: lint test ci clean
 
