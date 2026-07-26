@@ -1,10 +1,13 @@
 """Loss halts: vol-adjusted daily/intraday halts"""
+import logging
 import pandas as pd
 import json
 from typing import Dict, Tuple, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
 from engine_core.src.risk.logging import log_risk_event
+
+LOGGER = logging.getLogger(__name__)
 
 
 class LossHaltState:
@@ -258,6 +261,6 @@ class LossHaltState:
             
             return True
         except Exception as e:
-            print(f"[LOSS_HALT_STATE] Failed to load state from {filepath}: {e}")
+            LOGGER.warning("Failed to load state from %s: %s", filepath, e)
             return False
 

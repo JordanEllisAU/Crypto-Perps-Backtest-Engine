@@ -1,7 +1,10 @@
 """Technical indicators: ADX, EMA, MACD, Bollinger, RSI, ATR, Volume SMA"""
+import logging
 import pandas as pd
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+LOGGER = logging.getLogger(__name__)
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -163,7 +166,7 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
                     for name, series in result_data:
                         result[name] = series
             except Exception as exc:
-                print(f'Indicator computation failed: {exc}')
+                LOGGER.warning('Indicator computation failed: %s', exc)
                 raise
 
     return result

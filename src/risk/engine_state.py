@@ -1,10 +1,13 @@
 """Global trading state machine for risk and technical halts"""
 import json
+import logging
 from enum import Enum
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pathlib import Path
 from engine_core.src.risk.logging import log_risk_event
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TradingState(Enum):
@@ -129,7 +132,7 @@ class EngineStateManager:
             
             return True
         except Exception as e:
-            print(f"[ENGINE_STATE] Failed to load state from {filepath}: {e}")
+            LOGGER.warning("Failed to load state from %s: %s", filepath, e)
             return False
     
     def get_state_info(self) -> Dict[str, Any]:

@@ -1,10 +1,13 @@
 """Deep dive forensic analysis of backtest runs"""
 import json
+import logging
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
+
+LOGGER = logging.getLogger(__name__)
 
 
 def analyze_run(run_dir: str, output_md_path: str) -> None:
@@ -22,7 +25,7 @@ def analyze_run(run_dir: str, output_md_path: str) -> None:
     artifacts_dir = run_path / 'artifacts'
     
     # Load artifacts
-    print(f"Loading artifacts from {artifacts_dir}...")
+    LOGGER.info("Loading artifacts from %s", artifacts_dir)
     
     # Load metrics.json
     metrics_path = artifacts_dir / 'metrics.json'
@@ -52,10 +55,10 @@ def analyze_run(run_dir: str, output_md_path: str) -> None:
     if 'ts' in df_equity.columns:
         df_equity['ts'] = pd.to_datetime(df_equity['ts'], errors='coerce')
     
-    print(f"Loaded {len(df_trades)} trades and {len(df_equity)} equity records")
+    LOGGER.info("Loaded %s trades and %s equity records", len(df_trades), len(df_equity))
     
     # Compute all breakdowns
-    print("Computing breakdowns...")
+    LOGGER.info("Computing breakdowns...")
     analysis_results = {
         'run_dir': str(run_path),
         'run_name': run_path.name,
@@ -68,9 +71,9 @@ def analyze_run(run_dir: str, output_md_path: str) -> None:
     }
     
     # Generate report
-    print(f"Generating report at {output_md_path}...")
+    LOGGER.info("Generating report at %s", output_md_path)
     generate_markdown_report(analysis_results, Path(output_md_path))
-    print(f"Report generated successfully!")
+    LOGGER.info("Report generated successfully!")
 
 
 def compute_time_breakdown(df_trades: pd.DataFrame, df_equity: pd.DataFrame) -> Dict:

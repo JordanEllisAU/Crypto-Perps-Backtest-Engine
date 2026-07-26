@@ -1,4 +1,5 @@
 """Main backtest engine orchestrator"""
+import logging
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
@@ -84,6 +85,7 @@ class BacktestEngine:
             'es_checks': 0
         }
         self._start_time = time.time()
+        self._logger = logging.getLogger(__name__)
 
         # Initialize components
         self.portfolio = PortfolioState(
@@ -870,10 +872,10 @@ class BacktestEngine:
                 pass
         if not self.loss_halt_state.halt_manual:
             if debug_oracle:
-                print(f"[ORACLE DEBUG] process_bar_t: Calling generate_signals")
+                self._logger.info(f"[ORACLE DEBUG] process_bar_t: Calling generate_signals")
             self.generate_signals(symbol, idx, current_ts, master_side)
         elif debug_oracle:
-            print(f"[ORACLE DEBUG] process_bar_t: SKIPPING generate_signals (halted)")
+            self._logger.info(f"[ORACLE DEBUG] process_bar_t: SKIPPING generate_signals (halted)")
         self._profile_time['signal_generation'] = self._profile_time.get('signal_generation', 0) + (time.time() - start_signals)
 
         self._profile_time['process_bar_t'] += time.time() - start_time
@@ -916,7 +918,7 @@ class BacktestEngine:
                 if new_entry_events is not None:
                     events.extend(new_entry_events)
             except Exception as e:
-                print(f"WARNING: Error collecting new entry events for {symbol}: {e}")
+                self._logger.info(f"WARNING: Error collecting new entry events for {symbol}: {e}")
                 # Continue without new entry events
         
         # 3. Trails: tighten only
@@ -1578,20 +1580,20 @@ class BacktestEngine:
         """Print profiling summary"""
         import time
         total_time = time.time() - self._start_time
-        print("\n" + "="*80)
-        print("PROFILING SUMMARY")
-        print("="*80)
-        print(f"Total runtime: {total_time:.2f}s")
-        print(f"Bars processed: {self._profile_counts['bars_processed']}")
-        print(f"Signals generated: {self._profile_counts['signals_generated']}")
-        print(f"Events collected: {self._profile_counts['events_collected']}")
-        print(f"Events executed: {self._profile_counts['events_executed']}")
-        print(f"ES checks: {self._profile_counts['es_checks']}")
-        print("\nTime breakdown:")
+        self._logger.info("\n" + "="*80)
+        self._logger.info("PROFILING SUMMARY")
+        self._logger.info("="*80)
+        self._logger.info(f"Total runtime: {total_time:.2f}s")
+        self._logger.info(f"Bars processed: {self._profile_counts['bars_processed']}")
+        self._logger.info(f"Signals generated: {self._profile_counts['signals_generated']}")
+        self._logger.info(f"Events collected: {self._profile_counts['events_collected']}")
+        self._logger.info(f"Events executed: {self._profile_counts['events_executed']}")
+        self._logger.info(f"ES checks: {self._profile_counts['es_checks']}")
+        self._logger.info("\nTime breakdown:")
         for key, value in self._profile_time.items():
             pct = (value / total_time * 100) if total_time > 0 else 0
-            print(f"{key:<25}: {value:>8.2f}s ({pct:>5.1f}%)")
-        print("="*80)
+            self._logger.info(f"{key:<25}: {value:>8.2f}s ({pct:>5.1f}%)")
+        self._logger.info("="*80)
         
         # Print entry block summary if forensic_log exists
         self._print_entry_block_summary()
@@ -1609,12 +1611,12 @@ class BacktestEngine:
                 block_reasons[reason] = block_reasons.get(reason, 0) + 1
         
         if block_reasons:
-            print("\n" + "=" * 80)
-            print("ENTRY BLOCK SUMMARY")
-            print("=" * 80)
+            self._logger.info("\n" + "=" * 80)
+            self._logger.info("ENTRY BLOCK SUMMARY")
+            self._logger.info("=" * 80)
             for reason, count in sorted(block_reasons.items(), key=lambda x: x[1], reverse=True):
-                print(f"  {reason}: {count}")
-            print("=" * 80)
+                self._logger.info(f"  {reason}: {count}")
+            self._logger.info("=" * 80)
     
     # ========== Helper Methods ==========
     
@@ -1804,11 +1806,11 @@ class BacktestEngine:
         """Generate trading signals at bar t close"""
         debug_oracle = self.params.get('general', 'debug_oracle_flow', default=False)
         if debug_oracle:
-            print(f"[ORACLE DEBUG] generate_signals CALLED: symbol={symbol}, idx={idx}, ts={current_ts}, master_side={master_side}")
+            self._logger.info(f"[ORACLE DEBUG] generate_signals CALLED: symbol={symbol}, idx={idx}, ts={current_ts}, master_side={master_side}")
         df = self.symbol_data[symbol]
         if idx >= len(df):
             if debug_oracle:
-                print(f"[ORACLE DEBUG] generate_signals: idx {idx} >= len(df) {len(df)}, returning early")
+                self._logger.info(f"[ORACLE DEBUG] generate_signals: idx {idx} >= len(df) {len(df)}, returning early")
             return
         
         bar = df.iloc[idx]
@@ -1838,20 +1840,20 @@ class BacktestEngine:
                 oracle_signal = self.oracle_module.generate_always_long(symbol, df, idx, current_ts)
                 if oracle_signal:
                     if debug_oracle:
-                        print(f"[ORACLE DEBUG] Bar {idx} ({current_ts}): Created ORACLE signal for {symbol}, side={oracle_signal.side}, signal_bar_idx={oracle_signal.signal_bar_idx}")
+                        self._logger.info(f"[ORACLE DEBUG] Bar {idx} ({current_ts}): Created ORACLE signal for {symbol}, side={oracle_signal.side}, signal_bar_idx={oracle_signal.signal_bar_idx}")
                     self.symbol_pending_signals[symbol].append(oracle_signal)
                     self._profile_counts['signals_generated'] += 1
                     if debug_oracle:
-                        print(f"[ORACLE DEBUG] Bar {idx}: Added to pending_signals. Total pending for {symbol}: {len(self.symbol_pending_signals[symbol])}")
+                        self._logger.info(f"[ORACLE DEBUG] Bar {idx}: Added to pending_signals. Total pending for {symbol}: {len(self.symbol_pending_signals[symbol])}")
             elif oracle_mode == 'always_short':
                 oracle_signal = self.oracle_module.generate_always_short(symbol, df, idx, current_ts)
                 if oracle_signal:
                     if debug_oracle:
-                        print(f"[ORACLE DEBUG] Bar {idx} ({current_ts}): Created ORACLE signal for {symbol}, side={oracle_signal.side}, signal_bar_idx={oracle_signal.signal_bar_idx}")
+                        self._logger.info(f"[ORACLE DEBUG] Bar {idx} ({current_ts}): Created ORACLE signal for {symbol}, side={oracle_signal.side}, signal_bar_idx={oracle_signal.signal_bar_idx}")
                     self.symbol_pending_signals[symbol].append(oracle_signal)
                     self._profile_counts['signals_generated'] += 1
                     if debug_oracle:
-                        print(f"[ORACLE DEBUG] Bar {idx}: Added to pending_signals. Total pending for {symbol}: {len(self.symbol_pending_signals[symbol])}")
+                        self._logger.info(f"[ORACLE DEBUG] Bar {idx}: Added to pending_signals. Total pending for {symbol}: {len(self.symbol_pending_signals[symbol])}")
             elif oracle_mode == 'flat':
                 # No signals (flat strategy)
                 pass
@@ -2163,13 +2165,13 @@ class BacktestEngine:
         if long_only:
             filtered = [e for e in entry_events if e.side != 'SHORT']
             if len(filtered) < len(entry_events):
-                print(f"DEBUG: Gating applied (Long Only). Blocked {len(entry_events) - len(filtered)} SHORT events.")
+                self._logger.info(f"DEBUG: Gating applied (Long Only). Blocked {len(entry_events) - len(filtered)} SHORT events.")
             return filtered
             
         if short_only:
             filtered = [e for e in entry_events if e.side != 'LONG']
             if len(filtered) < len(entry_events):
-                print(f"DEBUG: Gating applied (Short Only). Blocked {len(entry_events) - len(filtered)} LONG events.")
+                self._logger.info(f"DEBUG: Gating applied (Short Only). Blocked {len(entry_events) - len(filtered)} LONG events.")
             return filtered
             
         return entry_events
@@ -2214,14 +2216,14 @@ class BacktestEngine:
         debug_oracle = self.params.get('general', 'debug_oracle_flow', default=False)
         pending_signals = self.symbol_pending_signals.get(symbol, [])
         if debug_oracle:
-            print(f"[ORACLE DEBUG] _collect_new_entry_events: symbol={symbol}, fill_idx={fill_idx}, pending_signals count={len(pending_signals)}")
+            self._logger.info(f"[ORACLE DEBUG] _collect_new_entry_events: symbol={symbol}, fill_idx={fill_idx}, pending_signals count={len(pending_signals)}")
             for i, sig in enumerate(pending_signals):
                 if hasattr(sig, 'module'):
-                    print(f"  Signal {i}: module={sig.module}, signal_bar_idx={getattr(sig, 'signal_bar_idx', 'N/A')}")
+                    self._logger.info(f"  Signal {i}: module={sig.module}, signal_bar_idx={getattr(sig, 'signal_bar_idx', 'N/A')}")
         oracle_signals = [s for s in pending_signals if hasattr(s, 'module') and s.module == 'ORACLE']
         deception_signals = [s for s in pending_signals if hasattr(s, 'module') and s.module == 'DECEPTION']
         if debug_oracle:
-            print(f"[ORACLE DEBUG] Found {len(oracle_signals)} ORACLE signals, {len(deception_signals)} DECEPTION signals")
+            self._logger.info(f"[ORACLE DEBUG] Found {len(oracle_signals)} ORACLE signals, {len(deception_signals)} DECEPTION signals")
         if deception_signals:
             # DECEPTION signals bypass max positions, loss halts, etc. (but not position check above)
             for signal in deception_signals:
@@ -2250,10 +2252,10 @@ class BacktestEngine:
                 # Note: fill_idx is the bar where we're processing fills (bar t+1), signal_bar_idx is where signal was created (bar t)
                 # So fill_idx should be >= signal_bar_idx + 1, but we allow >= for safety
                 if debug_oracle:
-                    print(f"[ORACLE DEBUG] Checking timing: fill_idx={fill_idx_scalar}, signal_bar_idx={signal_bar_idx_scalar}, condition={fill_idx_scalar >= signal_bar_idx_scalar}")
+                    self._logger.info(f"[ORACLE DEBUG] Checking timing: fill_idx={fill_idx_scalar}, signal_bar_idx={signal_bar_idx_scalar}, condition={fill_idx_scalar >= signal_bar_idx_scalar}")
                 if fill_idx_scalar >= signal_bar_idx_scalar:
                     if debug_oracle:
-                        print(f"[ORACLE DEBUG] Creating ORACLE_ENTRY event for {symbol}, side={signal.side}")
+                        self._logger.info(f"[ORACLE DEBUG] Creating ORACLE_ENTRY event for {symbol}, side={signal.side}")
                     events.append(OrderEvent(
                         event_type='ORACLE_ENTRY',
                         symbol=symbol,
@@ -2264,10 +2266,10 @@ class BacktestEngine:
                     ))
                     self._profile_counts['events_collected'] += 1
                     if debug_oracle:
-                        print(f"[ORACLE DEBUG] Created {len(events)} events, returning")
+                        self._logger.info(f"[ORACLE DEBUG] Created {len(events)} events, returning")
                     return events  # Return immediately for ORACLE (only one at a time)
                 elif debug_oracle:
-                    print(f"[ORACLE DEBUG] Timing check FAILED: fill_idx={fill_idx_scalar} < signal_bar_idx={signal_bar_idx_scalar}")
+                    self._logger.info(f"[ORACLE DEBUG] Timing check FAILED: fill_idx={fill_idx_scalar} < signal_bar_idx={signal_bar_idx_scalar}")
         
         # Check max positions
         max_positions = self.params.get_default('general', 'max_positions')
@@ -2532,11 +2534,11 @@ class BacktestEngine:
                 # ORACLE signals bypass all filters and go directly to execute_entry
                 debug_oracle = self.params.get('general', 'debug_oracle_flow', default=False)
                 if debug_oracle:
-                    print(f"[ORACLE DEBUG] execute_events: Calling execute_entry for ORACLE_ENTRY, symbol={event.symbol}, side={event.side}")
+                    self._logger.info(f"[ORACLE DEBUG] execute_events: Calling execute_entry for ORACLE_ENTRY, symbol={event.symbol}, side={event.side}")
                 self.execute_entry(event, fill_bar, fill_ts)
                 self._profile_counts['events_executed'] += 1
                 if debug_oracle:
-                    print(f"[ORACLE DEBUG] execute_entry returned. Trades count: {len(self.trades)}, Fills count: {len(self.fills)}")
+                    self._logger.info(f"[ORACLE DEBUG] execute_entry returned. Trades count: {len(self.trades)}, Fills count: {len(self.fills)}")
             # Note: Strategy-specific event types (TREND_ENTRY, RANGE_ENTRY, SQUEEZE_ENTRY, etc.) 
             # have been removed in Model-1. Only ORACLE_ENTRY is supported.
             elif event.event_type == 'TRAIL':
@@ -3610,10 +3612,10 @@ class BacktestEngine:
         # Get signal
         pending_signals = self.symbol_pending_signals.get(event.symbol, [])
         if debug_oracle and event.module == 'ORACLE':
-            print(f"[ORACLE DEBUG] execute_entry: Looking for ORACLE signal in {len(pending_signals)} pending signals for {event.symbol}")
+            self._logger.info(f"[ORACLE DEBUG] execute_entry: Looking for ORACLE signal in {len(pending_signals)} pending signals for {event.symbol}")
             for i, s in enumerate(pending_signals):
                 if hasattr(s, 'module'):
-                    print(f"  Signal {i}: module={s.module}, matches={s.module == event.module}")
+                    self._logger.info(f"  Signal {i}: module={s.module}, matches={s.module == event.module}")
         signal = None
         for s in pending_signals:
             if s.module == event.module:
@@ -3622,7 +3624,7 @@ class BacktestEngine:
         
         if not signal:
             if debug_oracle and event.module == 'ORACLE':
-                print(f"[ORACLE DEBUG] ERROR: No ORACLE signal found in pending_signals for {event.symbol}")
+                self._logger.info(f"[ORACLE DEBUG] ERROR: No ORACLE signal found in pending_signals for {event.symbol}")
             self.forensic_log.append({
                 'ts': fill_ts,
                 'symbol': event.symbol,
@@ -3695,7 +3697,7 @@ class BacktestEngine:
                 step_size = self.data_loader.get_contract_metadata(event.symbol).get('stepSize', 0.001)
                 qty = step_size  # Minimum position size
                 if debug_oracle:
-                    print(f"[ORACLE DEBUG] execute_entry: qty was 0, using minimum step_size={step_size}")
+                    self._logger.info(f"[ORACLE DEBUG] execute_entry: qty was 0, using minimum step_size={step_size}")
             else:
                 self.forensic_log.append({
                     'ts': fill_ts,
@@ -3772,7 +3774,7 @@ class BacktestEngine:
         # Use fill_bar close as entry price (market order simulation)
         entry_price = fill_bar['close']
         if debug_oracle and event.module == 'ORACLE':
-            print(f"[ORACLE DEBUG] execute_entry: Calculated qty={qty}, entry_price={entry_price}, stop_price={signal.stop_price}")
+            self._logger.info(f"[ORACLE DEBUG] execute_entry: Calculated qty={qty}, entry_price={entry_price}, stop_price={signal.stop_price}")
         
         # Validate constraints
         contract_metadata = self.data_loader.get_contract_metadata(event.symbol)
@@ -3782,7 +3784,7 @@ class BacktestEngine:
         
         if not is_valid:
             if debug_oracle and event.module == 'ORACLE':
-                print(f"[ORACLE DEBUG] execute_entry: Validation FAILED: {error_msg}")
+                self._logger.info(f"[ORACLE DEBUG] execute_entry: Validation FAILED: {error_msg}")
             self.forensic_log.append({
                 'ts': fill_ts,
                 'symbol': event.symbol,
@@ -3988,7 +3990,7 @@ class BacktestEngine:
                 entry_idx = -1
         
         if debug_oracle and event.module == 'ORACLE':
-            print(f"[ORACLE DEBUG] execute_entry: Adding position: symbol={event.symbol}, qty={adjusted_qty}, price={entry_price}, side={signal.side}")
+            self._logger.info(f"[ORACLE DEBUG] execute_entry: Adding position: symbol={event.symbol}, qty={adjusted_qty}, price={entry_price}, side={signal.side}")
         # DeceptionModule signals carry the bot's exit lattice (TP1/TP2/TSL).
         # Pass them through to Position so collect_deception_exit_events can use them.
         deception_kwargs = {}
@@ -4010,7 +4012,7 @@ class BacktestEngine:
         )
         self.symbol_prev_prices[event.symbol] = fill_price
         if debug_oracle and event.module == 'ORACLE':
-            print(f"[ORACLE DEBUG] execute_entry: Position added! Total positions: {len(self.portfolio.positions)}, Total trades: {len(self.trades)}")
+            self._logger.info(f"[ORACLE DEBUG] execute_entry: Position added! Total positions: {len(self.portfolio.positions)}, Total trades: {len(self.trades)}")
         
         # Get position_id after adding position
         position_id = self.portfolio.positions[event.symbol].position_id if event.symbol in self.portfolio.positions else ""
@@ -4072,7 +4074,7 @@ class BacktestEngine:
         
         # FIX 2 & 3: Record trade with position_id, open_ts, gap_through
         if debug_oracle and event.module == 'ORACLE':
-            print(f"[ORACLE DEBUG] execute_entry: Appending trade: symbol={event.symbol}, side={signal.side}, qty={adjusted_qty}, price={fill_price}")
+            self._logger.info(f"[ORACLE DEBUG] execute_entry: Appending trade: symbol={event.symbol}, side={signal.side}, qty={adjusted_qty}, price={fill_price}")
         self.trades.append({
             'ts': fill_ts,
             'symbol': event.symbol,
@@ -4095,7 +4097,7 @@ class BacktestEngine:
             'gap_through': gap_through
         })
         if debug_oracle and event.module == 'ORACLE':
-            print(f"[ORACLE DEBUG] execute_entry: Trade appended! Total trades: {len(self.trades)}")
+            self._logger.info(f"[ORACLE DEBUG] execute_entry: Trade appended! Total trades: {len(self.trades)}")
     
     def execute_trail(self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp):
         """Update trailing stops (tighten only)"""

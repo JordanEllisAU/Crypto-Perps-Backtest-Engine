@@ -1,7 +1,10 @@
 """Structured risk logging helper"""
 import json
+import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime, UTC
+
+LOGGER = logging.getLogger(__name__)
 
 
 # Launch Punch List – Quick Win #1: structured risk logging
@@ -36,8 +39,8 @@ def log_risk_event(
     if logger is not None:
         logger.append(log_entry)
     
-    # Also print structured JSON for immediate visibility
-    print(f"[RISK_LOG] {event_type}: {json.dumps(payload, default=str)}")
+    # Also emit structured JSON for immediate visibility
+    LOGGER.info("%s: %s", event_type, json.dumps(payload, default=str))
     
     return log_entry
 
