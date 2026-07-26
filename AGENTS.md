@@ -13,6 +13,12 @@ These directives are mandatory for all agents working in this repository. They r
 - No session/chat artifacts in commits (`.claude/*.json`, `.vscode/`, `.playwright-mcp/`, scratch files).
 - Document root cause, not just the fix.
 
+## Workspace process
+
+- Batch related changes into one PR; see `.github/PULL_REQUEST_TEMPLATE.md` and `CONTRIBUTING.md`.
+- Delete merged remote branches promptly; use `python scripts/workspace_health_report.py` to find candidates.
+- Reusable trading primitives that overlap with `DeceptionLeaderBot` should be proposed as a shared library, not copy-pasted.
+
 Full rule files:
 - `.cursor/rules/anti-circular-debug.mdc`
 - `.claude/rules/anti-circular-debug.md`
