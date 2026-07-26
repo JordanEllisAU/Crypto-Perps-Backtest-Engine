@@ -19,11 +19,19 @@ from __future__ import annotations
 
 import argparse
 import ast
+import logging
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+    stream=sys.stderr,
+)
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,7 +39,7 @@ PRINT_DIRS = {"src"}
 SIZE_DIRS = {"src"}
 MAX_SOURCE_LINES = 500
 
-PRINT_RE = re.compile(r"^\s*print\s*\(")
+PRINT_RE = re.compile(r"^\s*print\s*\(", re.MULTILINE)
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -48,7 +56,7 @@ def fetch_base(base_ref: str) -> None:
     if base_ref.startswith("origin/"):
         result = run(["git", "fetch", "origin", base_ref.split("/", 1)[1]])
         if result.returncode != 0:
-            print(f"warning: could not fetch {base_ref}: {result.stderr.strip()}", file=sys.stderr)
+            log.warning("could not fetch %s: %s", base_ref, result.stderr.strip())
 
 
 def _git_status_files() -> list[str]:
@@ -80,7 +88,7 @@ def changed_files(base_ref: str) -> list[Path]:
     lines.extend(_git_status_files())
 
     if not lines:
-        print(f"error: could not diff against {base_ref}", file=sys.stderr)
+        log.error("could not diff against %s", base_ref)
         sys.exit(1)
 
     seen: set[str] = set()
@@ -228,12 +236,12 @@ def main() -> int:
                 seen.add(key)
                 unique.append(o)
 
-        print(f"Slop sentinel FAILED: {len(unique)} new offense(s)", file=sys.stderr)
+        log.error("Slop sentinel FAILED: %s new offense(s)", len(unique))
         for o in unique:
-            print(f"  [{o['rule']}] {o['file']}:{o['line']} {o['snippet']}", file=sys.stderr)
+            log.error("  [%s] %s:%s %s", o["rule"], o["file"], o["line"], o["snippet"])
         return 1
 
-    print(f"Slop sentinel passed: {len(paths)} changed file(s), no new slop.")
+    log.info("Slop sentinel passed: %s changed file(s), no new slop.", len(paths))
     return 0
 
 
