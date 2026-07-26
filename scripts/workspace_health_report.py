@@ -36,7 +36,7 @@ def _branch_age_report() -> list[dict]:
     )
     refs = (
         _run(
-            ["git", "for-each-ref", "refs/remotes/origin/", "--format=%(refname:short)\t%(committerdate:iso8601)\t%(committername)"],
+            ["git", "for-each-ref", "refs/remotes/origin/", "--format=%(refname:short)\t%(committerdate:iso8601-strict)\t%(committername)"],
             cwd=ROOT,
         )
         .stdout.strip()
