@@ -75,6 +75,13 @@ def _git_status_files() -> list[str]:
 
 
 def changed_files(base_ref: str) -> list[Path]:
+    # Ensure the base ref exists so an empty diff means "no changed files",
+    # not "base ref is missing".
+    verify = run(["git", "rev-parse", "--verify", base_ref])
+    if verify.returncode != 0:
+        log.error("base ref %s not found: %s", base_ref, verify.stderr.strip())
+        sys.exit(1)
+
     lines: list[str] = []
 
     triple = f"{base_ref}...HEAD"
@@ -88,8 +95,8 @@ def changed_files(base_ref: str) -> list[Path]:
     lines.extend(_git_status_files())
 
     if not lines:
-        log.error("could not diff against %s", base_ref)
-        sys.exit(1)
+        log.info("no changed files against %s", base_ref)
+        return []
 
     seen: set[str] = set()
     paths: list[Path] = []
