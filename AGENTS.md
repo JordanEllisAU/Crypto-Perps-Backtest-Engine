@@ -5,7 +5,7 @@
 These directives are mandatory for all agents working in this repository. They replace previous ad-hoc orchestration tooling and prevent circular debugging.
 
 - Stop on a blocker; do not re-run the same failing command more than twice without a new hypothesis.
-- Run the repo's local lint/test/build gates before every commit (e.g., `make ci`, `npm test`, `pytest`, `npm run build`).
+- Run `make ci` before every commit; it compiles all Python files, runs the diff-based slop sentinel, and runs `pytest`.
 - No bare `print()` / `console.log()` / `printf()` in gate scripts; use structured logging.
 - Generated files must be deterministic (no timestamps, strip trailing whitespace).
 - Do not modify tests to pass; fix the code or skip with a reason.
