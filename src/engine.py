@@ -37,6 +37,7 @@ from engine_core.src.execution.fill_model import calculate_slippage, fill_stop_r
 from engine_core.src.execution.constraints import validate_order_constraints
 from engine_core.src.execution.funding_windows import check_funding_window
 from engine_core.src.execution.sequencing import EventSequencer, OrderEvent
+from engine_core.src.execution.fill_recorder import FillRecorder
 from engine_core.src.execution.order_manager import OrderManager, PendingOrder
 from engine_core.src.portfolio.state import PortfolioState
 from engine_core.src.portfolio.universe import UniverseManager
@@ -142,6 +143,16 @@ class BacktestEngine:
         self.positions_history: List[Dict] = []
         self.forensic_log: List[Dict] = []
         self._fill_counter: Dict[str, int] = {}  # Track fill sequence per position_id
+
+        # Fill/ledger recorder (extracted to keep engine focused on orchestration)
+        self.fill_recorder = FillRecorder(
+            self.run_id,
+            self._logger,
+            self.fills,
+            self.ledger,
+            self.outlier_log,
+            self._fill_counter,
+        )
         
         # Opportunity audit tracking
         self.opportunity_audit: List[Dict] = []  # Full audit records
@@ -555,7 +566,7 @@ class BacktestEngine:
                             participation_pct = (notional / adv60_usd) if adv60_usd > 0 else 0.0
                             
                             # Record exit fill
-                            self._record_fill(
+                            self.fill_recorder.record_fill(
                                 position_id=pos.position_id,
                                 ts=current_ts,
                                 symbol=pos_symbol,
@@ -582,7 +593,7 @@ class BacktestEngine:
                             
                             if closed_pos:
                                 # Record ledger and trade (similar to margin flatten)
-                                self._record_ledger_event(
+                                self.fill_recorder.record_ledger_event(
                                     ts=current_ts,
                                     event='EXIT_FILL',
                                     position_id=pos.position_id,
@@ -706,7 +717,7 @@ class BacktestEngine:
                     participation_pct = (notional / adv60_usd) if adv60_usd > 0 else 0.0
                     
                     # Record exit fill
-                    self._record_fill(
+                    self.fill_recorder.record_fill(
                         position_id=pos.position_id,
                         ts=end_ts,
                         symbol=pos_symbol,
@@ -735,7 +746,7 @@ class BacktestEngine:
                     if closed_pos:
                         # Record EXIT_FILL ledger event
                         # Note: pnl from close_position already has fees and slippage deducted
-                        self._record_ledger_event(
+                        self.fill_recorder.record_ledger_event(
                             ts=end_ts,
                             event='EXIT_FILL',
                             position_id=pos.position_id,
@@ -869,7 +880,7 @@ class BacktestEngine:
                 with open('artifacts/oracle_debug.log', 'a') as f:
                     f.write(msg)
             except OSError:
-                pass
+                self._logger.debug("Failed to write oracle debug log")
         if not self.loss_halt_state.halt_manual:
             if debug_oracle:
                 self._logger.info(f"[ORACLE DEBUG] process_bar_t: Calling generate_signals")
@@ -1040,7 +1051,7 @@ class BacktestEngine:
                     participation_pct = (notional / adv60_usd) if adv60_usd > 0 else 0.0
                     
                     # Record exit fill
-                    self._record_fill(
+                    self.fill_recorder.record_fill(
                         position_id=pos.position_id,
                         ts=fill_ts,
                         symbol=pos_symbol,
@@ -1067,7 +1078,7 @@ class BacktestEngine:
                     if closed_pos:
                         # Record EXIT_FILL ledger event
                         # Note: pnl from close_position already has fees and slippage deducted
-                        self._record_ledger_event(
+                        self.fill_recorder.record_ledger_event(
                             ts=fill_ts,
                             event='EXIT_FILL',
                             position_id=pos.position_id,
@@ -1180,7 +1191,7 @@ class BacktestEngine:
                 participation_pct = (notional / adv60_usd) if adv60_usd > 0 else 0.0
                 
                 # Record exit fill
-                self._record_fill(
+                self.fill_recorder.record_fill(
                     position_id=pos.position_id,
                     ts=fill_ts,
                     symbol=symbol_to_close,
@@ -1207,7 +1218,7 @@ class BacktestEngine:
                 
                 if closed_pos:
                     # Record ledger event
-                    self._record_ledger_event(
+                    self.fill_recorder.record_ledger_event(
                         ts=fill_ts,
                         event='EXIT_FILL',
                         position_id=pos.position_id,
@@ -1344,7 +1355,7 @@ class BacktestEngine:
                     participation_pct = (notional / adv60_usd) if adv60_usd > 0 else 0.0
                     
                     # Record exit fill
-                    self._record_fill(
+                    self.fill_recorder.record_fill(
                         position_id=pos.position_id,
                         ts=fill_ts,
                         symbol=pos_symbol,
@@ -1371,7 +1382,7 @@ class BacktestEngine:
                     if closed_pos:
                         # Record EXIT_FILL ledger event
                         # Note: pnl from close_position already has fees and slippage deducted
-                        self._record_ledger_event(
+                        self.fill_recorder.record_ledger_event(
                             ts=fill_ts,
                             event='EXIT_FILL',
                             position_id=pos.position_id,
@@ -2375,109 +2386,6 @@ class BacktestEngine:
                 self.execute_stale_cancel(event.order_id)
                 self._profile_counts['events_executed'] += 1
     
-    def _check_and_log_outlier(self, fill_info: Dict):
-        """Check if fill is an outlier and log if so"""
-        slippage_bps = abs(fill_info.get('slippage_bps_applied', 0.0))
-        
-        # Flag condition: slippage_bps > max(20, 3 * median_slippage_bps_symbol_30d)
-        # Fallback threshold = 20 bps (as we don't have 30d history loaded in engine)
-        threshold = 20.0 
-        
-        if slippage_bps > threshold:
-             outlier_record = fill_info.copy()
-             outlier_record['outlier_threshold_bps'] = threshold
-             self.outlier_log.append(outlier_record)
-    
-    def _record_fill(
-        self,
-        position_id: str,
-        ts: pd.Timestamp,
-        symbol: str,
-        module: str,
-        leg: str,  # 'ENTRY' or 'EXIT'
-        side: str,  # 'BUY' or 'SELL'
-        qty: float,
-        price: float,
-        notional_usd: float,
-        slippage_bps_applied: float,
-        slippage_cost_usd: float,
-        fee_bps: float,
-        fee_usd: float,
-        liquidity: str,  # 'maker' or 'taker'
-        participation_pct: float,
-        adv60_usd: float,
-        intended_price: float = None
-    ):
-        """Record a fill event to fills list"""
-        # Generate unique fill_id
-        if position_id not in self._fill_counter:
-            self._fill_counter[position_id] = 0
-        self._fill_counter[position_id] += 1
-        fill_id = f"{position_id}-{leg}-{self._fill_counter[position_id]}"
-        
-        fill_record = {
-            'run_id': self.run_id,
-            'position_id': position_id,
-            'fill_id': fill_id,
-            'ts': ts,
-            'symbol': symbol,
-            'module': module,
-            'leg': leg,
-            'side': side,
-            'qty': qty,
-            'price': price,
-            'notional_usd': notional_usd,
-            'slippage_bps_applied': slippage_bps_applied,
-            'slippage_cost_usd': slippage_cost_usd,
-            'fee_bps': fee_bps,
-            'fee_usd': fee_usd,
-            'liquidity': liquidity,
-            'participation_pct': participation_pct,
-            'adv60_usd': adv60_usd,
-            'intended_price': intended_price if intended_price is not None else price
-        }
-        
-        self.fills.append(fill_record)
-        self._check_and_log_outlier(fill_record)
-    
-    def _record_ledger_event(
-        self,
-        ts: pd.Timestamp,
-        event: str,
-        position_id: str,
-        symbol: str,
-        module: str,
-        leg: str,
-        side: str,
-        qty: float,
-        price: float,
-        notional_usd: float,
-        fee_usd: float,
-        slippage_cost_usd: float,
-        funding_usd: float,
-        cash_delta_usd: float,
-        note: str = ""
-    ):
-        """Record a cash-affecting event to ledger"""
-        self.ledger.append({
-            'ts': ts,
-            'run_id': self.run_id,
-            'event': event,
-            'position_id': position_id,
-            'symbol': symbol,
-            'module': module,
-            'leg': leg,
-            'side': side,
-            'qty': qty,
-            'price': price,
-            'notional_usd': notional_usd,
-            'fee_usd': fee_usd,
-            'slippage_cost_usd': slippage_cost_usd,
-            'funding_usd': funding_usd,
-            'cash_delta_usd': cash_delta_usd,
-            'note': note
-        })
-    
     def execute_stop(self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp):
         """Execute stop-loss fill"""
         if symbol not in self.portfolio.positions:
@@ -2556,7 +2464,7 @@ class BacktestEngine:
         participation_pct = (notional / adv60_usd) if adv60_usd > 0 else 0.0
         
         # Record exit fill
-        self._record_fill(
+        self.fill_recorder.record_fill(
             position_id=pos.position_id,
             ts=fill_ts,
             symbol=symbol,
@@ -2622,7 +2530,7 @@ class BacktestEngine:
             # Record EXIT_FILL ledger event
             # Note: pnl from close_position already has fees and slippage deducted
             # So cash_delta = pnl (the net effect on cash)
-            self._record_ledger_event(
+            self.fill_recorder.record_ledger_event(
                 ts=fill_ts,
                 event='EXIT_FILL',
                 position_id=pos.position_id,
@@ -2707,7 +2615,7 @@ class BacktestEngine:
         slippage_cost_usd = 0.0  # TP1/TP2 are limit-style targets; TSL uses the trailing stop price directly
 
         # Record exit fill
-        self._record_fill(
+        self.fill_recorder.record_fill(
             position_id=pos.position_id, ts=fill_ts, symbol=symbol,
             module='DECEPTION', leg='EXIT',
             side='SELL' if pos.side == 'LONG' else 'BUY',
@@ -2721,7 +2629,7 @@ class BacktestEngine:
             symbol, fill_price, fill_ts, reason, fees, slippage_cost_usd
         )
         if closed_pos:
-            self._record_ledger_event(
+            self.fill_recorder.record_ledger_event(
                 ts=fill_ts, event='EXIT_FILL', position_id=pos.position_id,
                 symbol=symbol, module='DECEPTION', leg='EXIT',
                 side='SELL' if pos.side == 'LONG' else 'BUY',
@@ -2771,7 +2679,7 @@ class BacktestEngine:
         fees = notional * (fee_bps / 10000.0)
 
         # Record partial exit fill
-        self._record_fill(
+        self.fill_recorder.record_fill(
             position_id=pos.position_id, ts=fill_ts, symbol=symbol,
             module='DECEPTION', leg='EXIT',
             side='SELL' if pos.side == 'LONG' else 'BUY',
@@ -2797,7 +2705,7 @@ class BacktestEngine:
             pos.tsl_extreme = fill_price  # start tracking from TP1 fill
         # else: remainder continues with fixed SL (checked by collect_stop_events / collect_deception_exit_events)
 
-        self._record_ledger_event(
+        self.fill_recorder.record_ledger_event(
             ts=fill_ts, event='PARTIAL_EXIT_FILL', position_id=pos.position_id,
             symbol=symbol, module='DECEPTION', leg='EXIT',
             side='SELL' if long else 'BUY',
@@ -2885,7 +2793,7 @@ class BacktestEngine:
         participation_pct = (notional / adv60_usd) if adv60_usd > 0 else 0.0
         
         # Record exit fill
-        self._record_fill(
+        self.fill_recorder.record_fill(
             position_id=pos.position_id,
             ts=fill_ts,
             symbol=symbol,
@@ -2922,7 +2830,7 @@ class BacktestEngine:
         
         if closed_pos:
             # Record ledger event
-            self._record_ledger_event(
+            self.fill_recorder.record_ledger_event(
                 ts=fill_ts,
                 event='EXIT_FILL',
                 position_id=pos.position_id,
@@ -3379,7 +3287,7 @@ class BacktestEngine:
         position_id = self.portfolio.positions[event.symbol].position_id if event.symbol in self.portfolio.positions else ""
         
         # Record entry fill
-        self._record_fill(
+        self.fill_recorder.record_fill(
             position_id=position_id,
             ts=fill_ts,
             symbol=event.symbol,
@@ -3400,7 +3308,7 @@ class BacktestEngine:
         )
         
         # Record ENTRY_FILL ledger event (cash decreases by fees + slippage)
-        self._record_ledger_event(
+        self.fill_recorder.record_ledger_event(
             ts=fill_ts,
             event='ENTRY_FILL',
             position_id=position_id,
@@ -3614,7 +3522,7 @@ class BacktestEngine:
                 participation_pct = (notional / adv60_usd) if adv60_usd > 0 else 0.0
                 
                 # Record exit fill
-                self._record_fill(
+                self.fill_recorder.record_fill(
                     position_id=pos.position_id,
                     ts=current_ts,
                     symbol=symbol,
@@ -3642,7 +3550,7 @@ class BacktestEngine:
                 if closed_pos:
                     # Record EXIT_FILL ledger event
                     # Note: pnl from close_position already has fees and slippage deducted
-                    self._record_ledger_event(
+                    self.fill_recorder.record_ledger_event(
                         ts=current_ts,
                         event='EXIT_FILL',
                         position_id=pos.position_id,
@@ -4049,7 +3957,7 @@ class BacktestEngine:
             })
             self.funding_events_count += 1
             
-            self._record_ledger_event(
+            self.fill_recorder.record_ledger_event(
                 ts=current_ts,
                 event='FUNDING',
                 position_id=pos.position_id,
