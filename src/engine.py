@@ -2003,155 +2003,6 @@ class BacktestEngine:
                 ))
         return events
     
-    def collect_squeeze_tp1_events(self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp) -> List[OrderEvent]:
-        """Collect SQUEEZE TP1 exit events - Strategy-specific (dead code in oracle mode)"""
-        events = []
-        
-        # Engine-agnostic: skip strategy-specific logic in oracle mode
-        oracle_mode = self.params.get('general', 'oracle_mode')
-        if oracle_mode:
-            return events
-        
-        if symbol not in self.portfolio.positions:
-            return events
-        
-        pos = self.portfolio.positions[symbol]
-        if pos.module != 'SQUEEZE' or pos.tp1_price <= 0:
-            return events  # Only for SQUEEZE with TP1 enabled
-        
-        # Check if TP1 is triggered
-        high = fill_bar['high']
-        low = fill_bar['low']
-        
-        tp1_triggered = False
-        if pos.side == 'LONG' and high >= pos.tp1_price:
-            tp1_triggered = True
-        elif pos.side == 'SHORT' and low <= pos.tp1_price:
-            tp1_triggered = True
-        
-        if tp1_triggered:
-            events.append(OrderEvent(
-                event_type='SQUEEZE_TP1',
-                symbol=symbol,
-                module=pos.module,
-                priority=1,  # Same priority as STOP (check before other exits)
-                signal_ts=pos.entry_ts
-            ))
-        
-        return events
-    
-    def collect_squeeze_vol_exit_events(self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp, fill_idx: int) -> List[OrderEvent]:
-        """Collect SQUEEZE volatility expansion exit events - Strategy-specific (dead code in oracle mode)"""
-        events = []
-        
-        # Engine-agnostic: skip strategy-specific logic in oracle mode
-        oracle_mode = self.params.get('general', 'oracle_mode')
-        if oracle_mode:
-            return events
-        
-        if symbol not in self.portfolio.positions:
-            return events
-        
-        pos = self.portfolio.positions[symbol]
-        if pos.module != 'SQUEEZE':
-            return events
-        
-        # Strategy-specific params - use defaults (not in base_params.json)
-        exit_atr_pct_thresh = 80.0  # Default
-        if exit_atr_pct_thresh <= 0:
-            return events  # Vol expansion exit disabled
-        
-        min_R_before_vol_exit = 0.5  # Default
-        
-        # Calculate current unrealized R
-        if pos.initial_R <= 0:
-            return events  # No R stored (shouldn't happen for SQUEEZE)
-        
-        current_price = fill_bar['close']
-        if pos.side == 'LONG':
-            unrealized_pnl = (current_price - pos.entry_price) * pos.qty
-        else:  # SHORT
-            unrealized_pnl = (pos.entry_price - current_price) * pos.qty
-        
-        unrealized_R = unrealized_pnl / (pos.initial_R * pos.qty) if (pos.initial_R * pos.qty) > 0 else 0.0
-        
-        # Check minimum R requirement
-        if unrealized_R < min_R_before_vol_exit:
-            return events  # Not enough profit yet
-        
-        # Calculate ATR percentile
-        df = self.symbol_data[symbol]
-        atr_percentile_lookback = 200  # Default, strategy-specific param not in base_params.json
-        
-        if fill_idx < atr_percentile_lookback or 'atr' not in df.columns:
-            return events  # Insufficient history
-        
-        try:
-            atr_window = df['atr'].iloc[fill_idx - atr_percentile_lookback:fill_idx]
-            atr_window_clean = atr_window.dropna()
-            
-            if len(atr_window_clean) < atr_percentile_lookback * 0.5:
-                return events  # Insufficient valid data
-            
-            current_atr = df['atr'].iloc[fill_idx]
-            if pd.isna(current_atr):
-                return events
-            
-            # Calculate percentile rank of current ATR
-            atr_pct_rank = (atr_window_clean < current_atr).sum() / len(atr_window_clean) * 100
-            
-            # Check if ATR percentile exceeds threshold
-            if atr_pct_rank >= exit_atr_pct_thresh:
-                events.append(OrderEvent(
-                    event_type='SQUEEZE_VOL_EXIT',
-                    symbol=symbol,
-                    module=pos.module,
-                    priority=2,  # After TP1/STOP but before TTL
-                    signal_ts=pos.entry_ts
-                ))
-        except (IndexError, KeyError):
-            pass  # Insufficient history or missing column
-        
-        return events
-    
-    def collect_squeeze_entry_events(self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp) -> List[OrderEvent]:
-        """Collect SQUEEZE entry events (entry_first) - Strategy-specific (dead code in oracle mode)"""
-        events = []
-        
-        # Engine-agnostic: skip strategy-specific logic in oracle mode
-        oracle_mode = self.params.get('general', 'oracle_mode')
-        if oracle_mode:
-            return events
-        
-        # Check pending SQUEEZE orders
-        pending_orders = self.order_manager.get_orders_by_module('SQUEEZE')
-        for order in pending_orders:
-            if order.symbol != symbol or order.filled:
-                continue
-            
-            # Check if entry trigger is hit
-            high = fill_bar['high']
-            low = fill_bar['low']
-            
-            trigger_hit = False
-            if order.side == 'LONG' and high >= order.trigger_price:
-                trigger_hit = True
-            elif order.side == 'SHORT' and low <= order.trigger_price:
-                trigger_hit = True
-            
-            if trigger_hit:
-                events.append(OrderEvent(
-                    event_type='SQUEEZE_ENTRY',
-                    symbol=symbol,
-                    module='SQUEEZE',
-                    priority=2,
-                    signal_ts=order.signal_ts,
-                    order_id=order.order_id,
-                    side=order.side
-                ))
-        
-        # Apply direction gates
-        return self._apply_direction_gates(events)
     
     def _apply_direction_gates(self, entry_events: List[OrderEvent]) -> List[OrderEvent]:
         """Apply global long-only / short-only direction gates"""
@@ -2356,7 +2207,7 @@ class BacktestEngine:
                 try:
                     pending_signals.remove(signal)
                 except (ValueError, TypeError):
-                    pass
+                    self._logger.debug("Failed to remove stale pending signal")
         
         # Model-1: Only ORACLE signals are supported
         # ORACLE signals are handled above with early return (bypass all checks)
@@ -2384,35 +2235,6 @@ class BacktestEngine:
         
         return events
     
-    def collect_range_time_stops(self, symbol: str, fill_idx: int, fill_ts: pd.Timestamp) -> List[OrderEvent]:
-        """Collect RANGE time stop events (20 bars) - Strategy-specific (dead code in oracle mode)"""
-        events = []
-        
-        # Engine-agnostic: skip strategy-specific logic in oracle mode
-        oracle_mode = self.params.get('general', 'oracle_mode')
-        if oracle_mode:
-            return events
-        
-        if symbol not in self.portfolio.positions:
-            return events
-        
-        pos = self.portfolio.positions[symbol]
-        
-        if pos.module != 'RANGE':
-            return events
-        
-        # Check if time stop is reached (20 bars) - use default if param not found
-        time_stop_bars = 20  # Default, strategy-specific params not in base_params.json
-        if pos.age_bars >= time_stop_bars:
-            events.append(OrderEvent(
-                event_type='STOP',
-                symbol=symbol,
-                module=pos.module,
-                priority=1,
-                signal_ts=pos.entry_ts
-            ))
-        
-        return events
     
     def collect_ttl_events(self, symbol: str, fill_idx: int, fill_ts: pd.Timestamp) -> List[OrderEvent]:
         """Collect TTL expiration events for both pending orders and filled positions"""
@@ -3144,467 +2966,6 @@ class BacktestEngine:
             self.symbol_daily_pnl[symbol] += pnl
             self.symbol_prev_prices.pop(symbol, None)
     
-    def execute_squeeze_vol_exit(self, symbol: str, fill_bar: pd.Series, fill_ts: pd.Timestamp):
-        """Execute SQUEEZE volatility expansion exit"""
-        if symbol not in self.portfolio.positions:
-            return
-        
-        pos = self.portfolio.positions[symbol]
-        if pos.module != 'SQUEEZE':
-            return
-        
-        # Use market order for vol expansion exit (exit immediately)
-        mid_price = (fill_bar['high'] + fill_bar['low']) / 2.0
-        slippage_params = self.params_dict.get('slippage_costs', {})
-        slippage_bps_base = slippage_params.get('base_slip_bps_intercept', 2.0)
-        
-        # Cost-model toggle removes fill-price slippage
-        if not self.cost_model_enabled:
-            slippage_bps_base = 0.0
-        
-        # Market order: use current mid with slippage.  mid_price is the intended fill;
-        # fill_price is the actual (worse) execution.
-        if pos.side == 'LONG':
-            fill_price = max(fill_bar['low'], mid_price * (1 - slippage_bps_base / 10000.0))
-        else:  # SHORT
-            fill_price = min(fill_bar['high'], mid_price * (1 + slippage_bps_base / 10000.0))
-        
-        gap_through = False
-        
-        # Positive slippage relative to intended mid_price
-        if mid_price > 0:
-            slippage_bps_applied = abs((fill_price - mid_price) / mid_price) * 10000.0
-        else:
-            slippage_bps_applied = slippage_bps_base
-        
-        # Calculate fees and slippage using the intended mid_price
-        notional = abs(pos.qty * mid_price)
-        fee_bps = self.params.get_default('general', 'taker_fee_bps')
-        if self.stress_fees:
-            fee_bps *= 1.5
-            
-        if not self.cost_model_enabled:
-            fee_bps = 0.0
-            slippage_bps_applied = 0.0
-            
-        fees = notional * (fee_bps / 10000.0)
-        
-        slippage_cost_usd = notional * (slippage_bps_applied / 10000.0)
-        
-        # Get ADV_60m for participation
-        df = self.symbol_data[symbol]
-        if hasattr(self, 'symbol_ts_to_idx') and symbol in self.symbol_ts_to_idx:
-            fill_idx = self.symbol_ts_to_idx[symbol].get(fill_ts, -1)
-        else:
-            # Fix pandas Series boolean ambiguity: ensure fill_idx is always a scalar integer
-            ts_matches = df[df['ts'] == fill_ts]
-            if len(ts_matches) > 0:
-                idx_result = ts_matches.index[0]
-                fill_idx = int(idx_result) if hasattr(idx_result, '__iter__') and not isinstance(idx_result, str) else int(idx_result)
-            else:
-                fill_idx = -1
-        adv60_usd = calculate_adv_60m(df['notional'], fill_idx) if fill_idx >= 0 else 0.0
-        participation_pct = (notional / adv60_usd) if adv60_usd > 0 else 0.0
-        
-        # Record exit fill
-        self._record_fill(
-            position_id=pos.position_id,
-            ts=fill_ts,
-            symbol=symbol,
-            module=pos.module,
-            leg='EXIT',
-            side='SELL' if pos.side == 'LONG' else 'BUY',
-            qty=pos.qty,
-            price=mid_price,
-            notional_usd=notional,
-            slippage_bps_applied=slippage_bps_applied,
-            slippage_cost_usd=slippage_cost_usd,
-            fee_bps=fee_bps,
-            fee_usd=fees,
-            liquidity='taker',
-            participation_pct=participation_pct,
-            adv60_usd=adv60_usd,
-            intended_price=mid_price
-        )
-        
-        # Calculate age_bars
-        if hasattr(self, 'symbol_ts_to_idx') and symbol in self.symbol_ts_to_idx:
-            close_idx = self.symbol_ts_to_idx[symbol].get(fill_ts, -1)
-        else:
-            close_idx = df[df['ts'] == fill_ts].index[0] if len(df[df['ts'] == fill_ts]) > 0 else -1
-        entry_idx = pos.entry_idx if pos.entry_idx >= 0 else -1
-        if entry_idx < 0:
-            entry_idx = df[df['ts'] == pos.entry_ts].index[0] if len(df[df['ts'] == pos.entry_ts]) > 0 else -1
-        age_bars = (close_idx - entry_idx) if entry_idx >= 0 and close_idx >= 0 else pos.age_bars
-        
-        # Close position at intended mid_price with explicit slippage cost
-        closed_pos, pnl = self.portfolio.close_position(
-            symbol, mid_price, fill_ts, 'VOL_EXIT', fees, slippage_cost_usd
-        )
-        
-        if closed_pos:
-            # Record ledger event
-            self._record_ledger_event(
-                ts=fill_ts,
-                event='EXIT_FILL',
-                position_id=pos.position_id,
-                symbol=symbol,
-                module=pos.module,
-                leg='EXIT',
-                side='SELL' if pos.side == 'LONG' else 'BUY',
-                qty=pos.qty,
-                price=mid_price,
-                notional_usd=notional,
-                fee_usd=fees,
-                slippage_cost_usd=slippage_cost_usd,
-                funding_usd=0.0,
-                cash_delta_usd=pnl,
-                note="SQUEEZE volatility expansion exit"
-            )
-            
-            # Record trade
-            self.trades.append({
-                'ts': fill_ts,
-                'symbol': symbol,
-                'side': pos.side,
-                'module': pos.module,
-                'qty': pos.qty,
-                'price': mid_price,
-                'fees': fees,
-                'slip_bps': slippage_bps_applied,
-                'participation_pct': participation_pct,
-                'post_only': False,
-                'stop_dist': abs(pos.entry_price - pos.stop_price),
-                'ES_used_before': 0.0,
-                'ES_used_after': 0.0,
-                'reason': 'VOL_EXIT',
-                'pnl': pnl,
-                'position_id': pos.position_id,
-                'open_ts': pos.entry_ts,
-                'close_ts': fill_ts,
-                'age_bars': age_bars,
-                'gap_through': gap_through
-            })
-            self.symbol_daily_pnl[symbol] += pnl
-            self.symbol_prev_prices.pop(symbol, None)
-    
-    def execute_squeeze_entry(self, order_id: str, fill_bar: pd.Series, fill_ts: pd.Timestamp):
-        """Execute SQUEEZE entry fill"""
-        if order_id not in self.order_manager.pending_orders:
-            return
-        
-        order = self.order_manager.pending_orders[order_id]
-        
-        # Check if symbol already has a position
-        if order.symbol in self.portfolio.positions:
-            return  # Already have position in this symbol
-        if order.filled:
-            return
-        
-        # Fill using stop-run model
-        mid_price = (fill_bar['high'] + fill_bar['low']) / 2.0
-        df = self.symbol_data[order.symbol]
-        # OPTIMIZATION: Use O(1) lookup if mapping available, otherwise fallback
-        if hasattr(self, 'symbol_ts_to_idx') and order.symbol in self.symbol_ts_to_idx:
-            fill_idx = self.symbol_ts_to_idx[order.symbol].get(fill_ts, order.signal_bar_idx)
-        else:
-            # Fix pandas Series boolean ambiguity: ensure fill_idx is always a scalar integer
-            ts_matches = df[df['ts'] == fill_ts]
-            if len(ts_matches) > 0:
-                idx_result = ts_matches.index[0]
-                fill_idx = int(idx_result) if hasattr(idx_result, '__iter__') and not isinstance(idx_result, str) else int(idx_result)
-            else:
-                fill_idx = order.signal_bar_idx
-        adv_60m = calculate_adv_60m(df['notional'], fill_idx)
-        
-        liquidity_state = self.symbol_liquidity_state.get(order.symbol)
-        regime = liquidity_state.regime if liquidity_state else 'NORMAL'
-        regime_adder = self.liquidity_detector.get_slippage_adder(regime)
-        post_only = bool(regime == 'THIN')
-        if post_only:
-            self.thin_post_only_entries_count += 1
-            self.thin_extra_slip_bps_total += regime_adder
-        
-        drawdown_mult, drawdown_halt = self._get_drawdown_size_constraints()
-        if drawdown_halt:
-            self.loss_halt_state.halt_manual = True
-            self.order_manager.cancel_order(order_id)
-            return
-        effective_qty = order.qty * drawdown_mult
-        if effective_qty <= 0:
-            self.order_manager.cancel_order(order_id)
-            return
-        
-        # Launch Punch List – Blocker #2: centralized ES + margin guardrails
-        # Get current ES usage
-        current_es_pct = (self.es_usage_samples[-1] * 100.0) if self.es_usage_samples else 0.0
-        # Calculate additional risk (stop distance * qty) - approximate with ATR
-        atr = df.iloc[order.signal_bar_idx].get('atr', 0) if order.signal_bar_idx < len(df) else 0.0
-        sl_atr_mult = 2.5  # Default, strategy-specific param not in base_params.json
-        stop_distance = sl_atr_mult * atr
-        additional_risk = stop_distance * effective_qty
-        
-        # Centralized risk check before order
-        from engine_core.src.risk.margin_guard import check_risk_before_order
-        risk_allowed, risk_reason, margin_ratio_proj, es_used_proj_pct = check_risk_before_order(
-            symbol=order.symbol,
-            qty=effective_qty,
-            price=order.trigger_price,
-            current_positions=self.portfolio.positions,
-            current_equity=self.portfolio.equity,
-            current_es_used_pct=current_es_pct,
-            additional_risk=additional_risk,
-            params=self.params_dict,
-            es_cap_pct=self.params.get('es_guardrails', 'es_cap_of_equity') or 0.0225
-        )
-        
-        if not risk_allowed:
-            # Block entry due to risk guardrails
-            self.forensic_log.append({
-                'ts': fill_ts,
-                'symbol': order.symbol,
-                'event': 'RISK_GUARD_BLOCK',
-                'module': order.module,
-                'reason': risk_reason,
-                'margin_ratio_proj': margin_ratio_proj,
-                'es_used_proj_pct': es_used_proj_pct
-            })
-            self.order_manager.cancel_order(order_id)
-            return
-        
-        order_notional = abs(effective_qty * order.trigger_price)
-        if adv_60m <= 0:
-            raise ValueError(f"ADV_60m is non-positive for {order.symbol} at {fill_ts}")
-        
-        # Check participation cap
-        participation_pct = order_notional / adv_60m
-        participation_cap = self.liquidity_detector.get_participation_cap(regime)
-        if participation_pct > participation_cap:
-            # Reject order - participation exceeds cap
-            self.forensic_log.append({
-                'ts': fill_ts,
-                'symbol': order.symbol,
-                'event': 'PARTICIPATION_CAP_BLOCK',
-                'module': order.module,
-                'participation_pct': participation_pct,
-                'cap': participation_cap,
-                'regime': regime
-            })
-            self.order_manager.cancel_order(order_id)
-            return
-        
-        slippage_params = self.params_dict.get('slippage_costs', {})
-        # FIX 5: Pass governed_universe flag (use require_liquidity_data as proxy)
-        slippage_bps, participation_pct = calculate_slippage(
-            order_notional, adv_60m,
-            slippage_params.get('base_slip_bps_intercept', 2.0),
-            slippage_params.get('base_slip_bps_slope_per_participation', 20.0),
-            regime_adder,
-            governed_universe=self.require_liquidity_data,
-            stress_slip=self.stress_slip
-        )
-        
-        self.forensic_log.append({
-            'ts': fill_ts,
-            'symbol': order.symbol,
-            'event': 'SLIPPAGE',
-            'module': order.module,
-            'participation_pct': participation_pct,
-            'slip_bps': slippage_bps,
-            'adv_60m': adv_60m,
-            'order_notional': order_notional,
-            'post_only': post_only
-        })
-        
-        # Cost-model toggle removes fill-price slippage as well as fees
-        if not self.cost_model_enabled:
-            slippage_bps = 0.0
-        
-        fill_price, gap_through = fill_stop_run(
-            order.trigger_price, order.side, fill_bar['high'], fill_bar['low'],
-            mid_price, slippage_bps
-        )
-        
-        # Log gap-through to forensic log
-        if gap_through:
-            self.forensic_log.append({
-                'ts': fill_ts,
-                'symbol': order.symbol,
-                'event': 'GAP_THROUGH',
-                'module': order.module,
-                'side': order.side,
-                'trigger_price': order.trigger_price,
-                'fill_price': fill_price,
-                'bar_high': fill_bar['high'],
-                'bar_low': fill_bar['low']
-            })
-        
-        # Validate constraints
-        contract_metadata = self.data_loader.get_contract_metadata(order.symbol)
-        is_valid, error_msg, adjusted_qty, adjusted_price = validate_order_constraints(
-            effective_qty, fill_price, contract_metadata, order.side
-        )
-        
-        if not is_valid:
-            return  # Reject order
-        
-        # Calculate fees and slippage using the intended trigger price
-        # Stop-run entries are taker, unless post_only=True (maker)
-        notional = abs(adjusted_qty * order.trigger_price)
-        fill_is_taker = not post_only  # Taker unless post-only resting fill
-        fee_bps = self.params.get_default('general', 'taker_fee_bps') if fill_is_taker else self.params.get_default('general', 'maker_fee_bps')
-        if self.stress_fees:
-            fee_bps *= 1.5  # Stress test: multiply fees by 1.5x
-        if not self.cost_model_enabled:
-            fee_bps = 0.0
-            slippage_bps = 0.0
-            
-        fees = notional * (fee_bps / 10000.0)
-        
-        # Actual slippage experienced relative to intended trigger
-        if order.side == 'LONG':
-            slippage_bps_applied = ((fill_price - order.trigger_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
-        else:  # SHORT
-            slippage_bps_applied = ((order.trigger_price - fill_price) / mid_price) * 10000.0 if mid_price > 0 else slippage_bps
-        
-        if not self.cost_model_enabled:
-            slippage_bps_applied = 0.0
-        
-        slippage_cost_usd = notional * (slippage_bps_applied / 10000.0)
-        
-        # Calculate stop price based on side
-        atr = self.symbol_data[order.symbol].iloc[order.signal_bar_idx].get('atr', 0)
-        sl_atr_mult = 2.5  # Default, strategy-specific param not in base_params.json
-        if order.side == 'LONG':
-            stop_price = adjusted_price - (sl_atr_mult * atr)
-        else:  # SHORT
-            stop_price = adjusted_price + (sl_atr_mult * atr)
-        
-        # ES guardrail
-        signal_bar = self.symbol_data[order.symbol].iloc[order.signal_bar_idx]
-        vol_forecast = signal_bar.get('vol_forecast', 0.02)
-        vol_fast_median = signal_bar.get('vol_fast_median', 0.02)
-        candidate_risk = abs(stop_price - adjusted_price) * abs(adjusted_qty)
-        es_ok, es_before, es_after = self._passes_es_guard(
-            candidate_risk, order.symbol, order.module, fill_ts,
-            vol_forecast, vol_fast_median
-        )
-        if not es_ok:
-            self.es_block_count += 1  # G: Track ES blocks
-            self.order_manager.cancel_order(order_id)
-            return
-        
-        if not self._check_beta_caps_with_new_position(order.symbol, adjusted_qty, adjusted_price, fill_ts, order.side):
-            self.beta_block_count += 1  # G: Track beta blocks
-            self.order_manager.cancel_order(order_id)
-            return
-        
-        # Calculate R and TP1 for SQUEEZE positions
-        initial_R = abs(adjusted_price - stop_price)
-        tp1_mult_R = 0.0  # Default, strategy-specific param not in base_params.json
-        tp1_price = 0.0
-        if tp1_mult_R > 0:
-            if order.side == 'LONG':
-                tp1_price = adjusted_price + (tp1_mult_R * initial_R)
-            else:  # SHORT
-                tp1_price = adjusted_price - (tp1_mult_R * initial_R)
-        
-        # Add position using intended trigger price; costs already deducted
-        # OPTIMIZATION: Pass entry_idx to avoid future lookups
-        self.portfolio.add_position(
-            order.symbol, adjusted_qty, order.trigger_price, fill_ts,
-            stop_price,  # Stop
-            stop_price,  # Trail (initial)
-            order.module, order.side, fees, slippage_cost_usd,
-            entry_idx=fill_idx  # Store bar index for performance
-        )
-        
-        # Store R and TP1 for SQUEEZE positions
-        if order.symbol in self.portfolio.positions:
-            pos = self.portfolio.positions[order.symbol]
-            pos.initial_R = initial_R
-            pos.tp1_price = tp1_price
-        
-        self.symbol_prev_prices[order.symbol] = adjusted_price
-        
-        # Get position_id after adding position
-        position_id = self.portfolio.positions[order.symbol].position_id if order.symbol in self.portfolio.positions else ""
-        
-        # Record entry fill
-        self._record_fill(
-            position_id=position_id,
-            ts=fill_ts,
-            symbol=order.symbol,
-            module=order.module,
-            leg='ENTRY',
-            side='BUY' if order.side == 'LONG' else 'SELL',
-            qty=adjusted_qty,
-            price=order.trigger_price,
-            notional_usd=notional,
-            slippage_bps_applied=slippage_bps_applied,
-            slippage_cost_usd=slippage_cost_usd,
-            fee_bps=fee_bps,
-            fee_usd=fees,
-            liquidity='maker' if post_only else 'taker',
-            participation_pct=participation_pct,
-            adv60_usd=adv_60m,
-            intended_price=order.trigger_price
-        )
-        
-        # Record ENTRY_FILL ledger event (cash decreases by fees + slippage)
-        self._record_ledger_event(
-            ts=fill_ts,
-            event='ENTRY_FILL',
-            position_id=position_id,
-            symbol=order.symbol,
-            module=order.module,
-            leg='ENTRY',
-            side='BUY' if order.side == 'LONG' else 'SELL',
-            qty=adjusted_qty,
-            price=order.trigger_price,
-            notional_usd=notional,
-            fee_usd=fees,
-            slippage_cost_usd=slippage_cost_usd,
-            funding_usd=0.0,
-            cash_delta_usd=-(fees + slippage_cost_usd),  # Cash decreases
-            note=f"Entry fill: {order.module}"
-        )
-        
-        # Calculate ES_used_after (with new position)
-        import time
-        es_start = time.time()
-        _, _, es_after_actual = self._passes_es_guard(
-            0.0, order.symbol, order.module, fill_ts,
-            vol_forecast, vol_fast_median
-        )
-        self._profile_time['es_checks'] += time.time() - es_start
-        self._profile_counts['es_checks'] += 1
-        
-        # Mark order as filled
-        self.order_manager.fill_order(order_id, adjusted_price, fill_ts)
-        
-        # FIX 2 & 3: Record trade with position_id, open_ts, gap_through
-        self.trades.append({
-            'ts': fill_ts,
-            'symbol': order.symbol,
-            'side': order.side,
-            'module': order.module,
-            'qty': adjusted_qty,
-            'price': order.trigger_price,
-            'fees': fees,
-            'slip_bps': slippage_bps_applied,
-            'participation_pct': participation_pct,
-            'post_only': post_only,
-            'stop_dist': abs(adjusted_price - stop_price),
-            'ES_used_before': es_before,
-            'ES_used_after': es_after_actual,
-            'reason': 'ENTRY',
-            'position_id': position_id,
-            'open_ts': fill_ts,
-            'close_ts': None,
-            'age_bars': 0,
-            'gap_through': gap_through
-        })
     
     def execute_entry(self, event: OrderEvent, fill_bar: pd.Series, fill_ts: pd.Timestamp):
         """Execute new entry with all risk checks"""
@@ -3664,7 +3025,7 @@ class BacktestEngine:
                     if idx is not None:
                         pending_signals.pop(idx)
                 except (ValueError, TypeError):
-                    pass
+                    self._logger.debug("Failed to remove stale pending signal")
                 return
             size_mult *= drawdown_mult
         else:
@@ -3768,7 +3129,7 @@ class BacktestEngine:
                 if idx is not None:
                     pending_signals.pop(idx)
             except (ValueError, TypeError):
-                pass
+                self._logger.debug("Failed to remove stale pending signal")
             return
         
         # Use fill_bar close as entry price (market order simulation)
@@ -3846,7 +3207,7 @@ class BacktestEngine:
                 if idx is not None:
                     pending_signals.pop(idx)
             except (ValueError, TypeError):
-                pass
+                self._logger.debug("Failed to remove stale pending signal")
             return
         
         slippage_params = self.params_dict.get('slippage_costs', {})
@@ -3930,7 +3291,7 @@ class BacktestEngine:
                 if idx is not None:
                     pending_signals.pop(idx)
             except (ValueError, TypeError):
-                pass
+                self._logger.debug("Failed to remove stale pending signal")
             return
         
         if not self._check_beta_caps_with_new_position(event.symbol, adjusted_qty, fill_price, fill_ts, signal.side):
@@ -3947,7 +3308,7 @@ class BacktestEngine:
                 if idx is not None:
                     pending_signals.pop(idx)
             except (ValueError, TypeError):
-                pass
+                self._logger.debug("Failed to remove stale pending signal")
             return
         
         # Calculate fees and slippage using the intended (tick-aligned) entry price
@@ -4070,7 +3431,7 @@ class BacktestEngine:
             if idx is not None:
                 pending_signals.pop(idx)
         except (ValueError, TypeError):
-            pass
+            self._logger.debug("Failed to remove stale pending signal")
         
         # FIX 2 & 3: Record trade with position_id, open_ts, gap_through
         if debug_oracle and event.module == 'ORACLE':
