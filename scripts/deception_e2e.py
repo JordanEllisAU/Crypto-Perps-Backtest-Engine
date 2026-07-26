@@ -42,6 +42,15 @@ from engine_core.src.data.loader import DataLoader
 from engine_core.src.engine import BacktestEngine
 from engine_core.src.modules.deception import DeceptionSignal, load_signals_csv
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _gate_log import emit_report, get_logger
+
+log = get_logger("deception_e2e")
+
+
+
 
 def _sanitize_symbol(sym: str) -> str:
     """Convert symbol name (e.g. 'BTC/USDT:USDT') to filesystem-safe name."""
@@ -67,7 +76,7 @@ def load_ohlcv(data_dir: Path) -> Dict[str, pd.DataFrame]:
         if "notional" not in df.columns and "volume" in df.columns:
             df["notional"] = df["close"] * df["volume"]
         result[sym] = df
-        print(f"  Loaded {sym} ({tf}): {len(df)} bars")
+        emit_report(f"  Loaded {sym} ({tf}): {len(df)} bars")
     return result
 
 
@@ -81,9 +90,9 @@ def run_deception_backtest(
     max_positions: int = 14,
 ) -> Dict:
     """Run the DeceptionModule backtest through the engine."""
-    print("\n" + "=" * 70)
-    print("PHASE: DeceptionModule Backtest (Real Signal Replay)")
-    print("=" * 70)
+    emit_report("\n" + "=" * 70)
+    emit_report("PHASE: DeceptionModule Backtest (Real Signal Replay)")
+    emit_report("=" * 70)
 
     # Prepare data dir in engine's expected format
     data_dir = output_dir / "data"
@@ -133,7 +142,7 @@ def run_deception_backtest(
     try:
         engine.run(start_ts=start_ts, end_ts=end_ts, output_dir=str(output_dir / "reports"))
     except Exception as e:
-        print(f"  ERROR: {e}")
+        emit_report(f"  ERROR: {e}")
         return {"phase": "deception_backtest", "status": "FAIL", "error": str(e)}
 
     trades = engine.trades or []
@@ -159,18 +168,18 @@ def run_deception_backtest(
         "equity": engine.portfolio.equity,
         "fees_paid": engine.portfolio.fees_paid,
     }
-    print(f"  Trades: {len(trades)}, PnL: ${total_pnl:.2f}, WR: {win_rate:.1f}%")
-    print(f"  Equity: ${engine.portfolio.equity:.2f}, Fees: ${engine.portfolio.fees_paid:.2f}")
+    emit_report(f"  Trades: {len(trades)}, PnL: ${total_pnl:.2f}, WR: {win_rate:.1f}%")
+    emit_report(f"  Equity: ${engine.portfolio.equity:.2f}, Fees: ${engine.portfolio.fees_paid:.2f}")
     for reason, stats in result["by_reason"].items():
-        print(f"  {reason}: {stats['count']} trades, ${stats['pnl']:.2f}")
+        emit_report(f"  {reason}: {stats['count']} trades, ${stats['pnl']:.2f}")
     return result
 
 
 def run_data_integrity(ohlcv: Dict[str, pd.DataFrame]) -> Dict:
     """Phase 1: Data Integrity — timestamp monotonicity, gaps, NaNs, OHLC sanity."""
-    print("\n" + "=" * 70)
-    print("PHASE: Data Integrity")
-    print("=" * 70)
+    emit_report("\n" + "=" * 70)
+    emit_report("PHASE: Data Integrity")
+    emit_report("=" * 70)
     errors: List[str] = []
     checked = 0
     for sym, df in ohlcv.items():
@@ -192,24 +201,24 @@ def run_data_integrity(ohlcv: Dict[str, pd.DataFrame]) -> Dict:
             errors.append(f"{sym}: non-monotonic timestamps")
         checked += 1
         if not any(sym in e for e in errors):
-            print(f"  OK: {sym} — {len(df)} bars")
+            emit_report(f"  OK: {sym} — {len(df)} bars")
     result = {
         "phase": "data_integrity",
         "status": "PASS" if not errors else "FAIL",
         "symbols_checked": checked,
         "errors": errors,
     }
-    print(f"  RESULT: {result['status']} ({checked} symbols, {len(errors)} errors)")
+    emit_report(f"  RESULT: {result['status']} ({checked} symbols, {len(errors)} errors)")
     return result
 
 
 def run_accounting_invariants(backtest_result: Dict) -> Dict:
     """Phase 2: Accounting Invariants — equity identity, PnL conservation."""
-    print("\n" + "=" * 70)
-    print("PHASE: Accounting Invariants")
-    print("=" * 70)
+    emit_report("\n" + "=" * 70)
+    emit_report("PHASE: Accounting Invariants")
+    emit_report("=" * 70)
     if backtest_result.get("status") == "SKIP":
-        print("  SKIP: No backtest ran")
+        emit_report("  SKIP: No backtest ran")
         return {"phase": "accounting_invariants", "status": "SKIP"}
 
     trades = backtest_result.get("by_reason", {})
@@ -224,8 +233,8 @@ def run_accounting_invariants(backtest_result: Dict) -> Dict:
         "trade_pnl_sum": trade_pnl_sum,
         "total_pnl": total_pnl,
     }
-    print(f"  PnL conservation: {result['pnl_conservation']}")
-    print(f"  RESULT: {result['status']}")
+    emit_report(f"  PnL conservation: {result['pnl_conservation']}")
+    emit_report(f"  RESULT: {result['status']}")
     return result
 
 
@@ -235,9 +244,9 @@ def generate_what_can_be_better(
     backtest_result: Dict,
 ) -> Dict:
     """Generate the 'what can be better' directional analysis report."""
-    print("\n" + "=" * 70)
-    print("PHASE: What Can Be Better (Directional Analysis)")
-    print("=" * 70)
+    emit_report("\n" + "=" * 70)
+    emit_report("PHASE: What Can Be Better (Directional Analysis)")
+    emit_report("=" * 70)
 
     findings: List[str] = []
     metrics: Dict[str, Any] = {}
@@ -483,9 +492,9 @@ def generate_what_can_be_better(
         "metrics": metrics,
         "findings": findings,
     }
-    print(f"  Findings: {len(findings)}")
+    emit_report(f"  Findings: {len(findings)}")
     for f in findings:
-        print(f"  - {f}")
+        emit_report(f"  - {f}")
     return result
 
 
@@ -540,7 +549,7 @@ def write_markdown_report(
             lines.append("")
 
     output_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"\n  Report written to: {output_path}")
+    emit_report(f"\n  Report written to: {output_path}")
 
 
 def main():
@@ -558,26 +567,26 @@ def main():
 
     maker_fee, taker_fee = [float(x) for x in args.fees.split(",")]
 
-    print("=" * 70)
-    print("DeceptionLeaderBot E2E Directional Validator")
-    print(f"Signals: {args.signals}")
-    print(f"Data: {args.data}")
-    print(f"Output: {output_dir}")
-    print(f"Fees: maker={maker_fee}, taker={taker_fee}")
-    print("=" * 70)
+    emit_report("=" * 70)
+    emit_report("DeceptionLeaderBot E2E Directional Validator")
+    emit_report(f"Signals: {args.signals}")
+    emit_report(f"Data: {args.data}")
+    emit_report(f"Output: {output_dir}")
+    emit_report(f"Fees: maker={maker_fee}, taker={taker_fee}")
+    emit_report("=" * 70)
 
     # Load signals
     signals = load_signals_csv(args.signals)
-    print(f"\nLoaded {len(signals)} signals")
+    emit_report(f"\nLoaded {len(signals)} signals")
     if not signals:
-        print("ERROR: No signals loaded")
+        emit_report("ERROR: No signals loaded")
         sys.exit(1)
 
     # Load OHLCV
-    print("\n--- Loading OHLCV data ---")
+    emit_report("\n--- Loading OHLCV data ---")
     ohlcv = load_ohlcv(Path(args.data))
     if not ohlcv:
-        print("ERROR: No OHLCV data loaded")
+        emit_report("ERROR: No OHLCV data loaded")
         sys.exit(1)
 
     # Sanitize signal symbols to match OHLCV keys
@@ -597,19 +606,19 @@ def main():
     results["what_can_be_better"] = generate_what_can_be_better(signals, ohlcv, backtest)
 
     # Summary
-    print("\n" + "=" * 70)
-    print("E2E VALIDATION SUMMARY")
-    print("=" * 70)
+    emit_report("\n" + "=" * 70)
+    emit_report("E2E VALIDATION SUMMARY")
+    emit_report("=" * 70)
     all_pass = True
     for phase_name, result in results.items():
         status = result["status"]
         icon = "[PASS]" if status == "PASS" else "[FAIL]" if status == "FAIL" else "[SKIP]"
-        print(f"  {icon} {phase_name}: {status}")
+        emit_report(f"  {icon} {phase_name}: {status}")
         if status == "FAIL":
             all_pass = False
 
     overall = "PASS" if all_pass else "FAIL"
-    print(f"\n  OVERALL: {overall}")
+    emit_report(f"\n  OVERALL: {overall}")
 
     # Save JSON results
     results_file = output_dir / "e2e_validation_results.json"
@@ -621,7 +630,7 @@ def main():
             "overall_status": overall,
             "phases": results,
         }, f, indent=2, default=str)
-    print(f"\n  Results saved to: {results_file}")
+    emit_report(f"\n  Results saved to: {results_file}")
 
     # Write markdown report
     write_markdown_report(results, output_dir / "validation_report.md", len(signals), symbols)

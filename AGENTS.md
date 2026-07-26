@@ -48,14 +48,41 @@ Full rule files:
   - `python -m pytest -q` -> 59 passed, 6 skipped (was 56 passed, 6 skipped).
   - `python scripts/run_example_oracle.py` -> PASS.
 
+### Gate scripts moved off bare `print()` (2026-07-26)
+
+- **Symptom:** `scripts/*.py` contained **138 bare `print()` calls**, directly
+  contradicting the directive above.
+- **Root cause:** nothing enforced the rule. This repo has no lint or hygiene
+  gate — the GitHub Actions workflows were removed in #6 — so the only gate
+  that runs is `pytest`, and it had no opinion on script output.
+- **Fix:** `scripts/_gate_log.py` is the shared logger the directive asks for.
+  It separates three things that were all `print()` before, and are not
+  interchangeable:
+  - `get_logger()` — diagnostics and pass/fail, on **stderr**, so a caller can
+    redirect the report body independently of the running commentary;
+  - `emit_report()` — column-aligned report bodies, written to stdout verbatim
+    (a log prefix on every row would destroy the alignment; `end=` supports the
+    incremental `Checking X... OK` style);
+  - `emit_payload()` — machine-readable JSON, whose bytes are a caller's
+    contract and must carry no decoration.
+  Built on the standard library, since this repo has no third-party logging
+  dependency. All 138 calls converted; `print` count under `scripts/` is 0.
+- **Enforcement:** `tests/test_gate_script_hygiene.py` fails the suite if a bare
+  `print()` reappears under `scripts/`, detected via AST rather than regex so
+  nested scopes are caught and docstrings are not false-positives. It also pins
+  that `emit_report` writes verbatim, `emit_payload` round-trips as JSON, and
+  the logger stays off stdout. Verified by reintroducing a `print()` and
+  confirming the suite fails with the offending file and line.
+- **Verification:**
+  - `python -m pytest -q` -> 76 passed, 6 skipped (was 56 passed, 6 skipped).
+  - `python scripts/run_example_oracle.py` -> exit 0, report formatting intact.
+  - `python -m compileall -q scripts/` -> clean; every script still imports.
+
 ### Known debt (reported, not addressed)
 
-- `scripts/*.py` contain **138 bare `print()` calls**, contradicting the
-  directive above. Converting them changes the human-readable output these
-  validation tools produce, so it needs an explicit decision on the target
-  format rather than a mechanical rewrite.
 - `src/engine.py` is **5017 lines** and `src/reporting.py` is 2262; there is no
-  module-size gate in this repo to hold that line.
+  module-size gate in this repo to hold that line. Splitting them is a real
+  refactor of live execution code and is not something to do incidentally.
 - PR #3 is stale: both of its fixes (the sequencer tie-breaker test and the
   per-trade parity entry-cost attribution) are already present on `main` via
   #4/#5. Verified by running the named test and reading `scripts/parity_replay.py`.

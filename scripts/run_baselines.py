@@ -15,11 +15,19 @@ from engine_core.config.params_loader import ParamsLoader
 from engine_core.src.engine import BacktestEngine
 from engine_core.src.data.loader import DataLoader
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _gate_log import emit_report, get_logger
+
+log = get_logger("run_baselines")
+
+
 
 def run_buy_and_hold(data_loader: DataLoader, start_ts: pd.Timestamp, end_ts: pd.Timestamp, output_dir: Path):
     """Run Buy & Hold strategy using ORACLE module (always_long, enters on first bar, exits on last bar)"""
     import sys
-    print("    Creating params...", file=sys.stderr, flush=True)
+    log.info("    Creating params...")
     params = ParamsLoader(overrides={
         'general': {'oracle_mode': 'always_long'},
         'es_guardrails': {'es_cap_of_equity': 1.0},
@@ -27,12 +35,12 @@ def run_buy_and_hold(data_loader: DataLoader, start_ts: pd.Timestamp, end_ts: pd
         'slippage_costs': {'participation_cap_normal': 0.05, 'participation_cap_thin': 0.01}
     }, strict=False)
     
-    print("    Creating BacktestEngine...", file=sys.stderr, flush=True)
+    log.info("    Creating BacktestEngine...")
     engine = BacktestEngine(data_loader, params, require_liquidity_data=False)
     
-    print(f"    Running engine.run({start_ts} to {end_ts})...", file=sys.stderr, flush=True)
+    log.info("    Running engine.run({start_ts} to {end_ts})...")
     engine.run(start_ts=start_ts, end_ts=end_ts, output_dir=str(output_dir / "buy_and_hold"))
-    print("    Engine.run() completed.", file=sys.stderr, flush=True)
+    log.info("    Engine.run() completed.")
     
     return engine
 
@@ -147,7 +155,7 @@ def generate_summary(baselines: dict, output_dir: Path, data_loader: DataLoader 
     df = pd.DataFrame(summary_data)
     summary_path = output_dir / "baselines_summary.csv"
     df.to_csv(summary_path, index=False)
-    print(f"Baseline summary saved to {summary_path}")
+    emit_report(f"Baseline summary saved to {summary_path}")
     
     return df
 
@@ -185,111 +193,112 @@ def main():
         available_symbols.append(symbol)
     
     if not available_symbols:
-        print(f"ERROR: No symbol data found in {args.data_path}")
-        print("Expected files like: BTCUSDT_15m.csv, ETHUSDT_15m.csv, etc.")
+        emit_report(f"ERROR: No symbol data found in {args.data_path}")
+        emit_report("Expected files like: BTCUSDT_15m.csv, ETHUSDT_15m.csv, etc.")
         return
     
     # Load symbols - limit to first 3 for faster testing (can be removed for full run)
     # For baselines, we typically only need BTCUSDT and ETHUSDT
     symbols_to_load = ['BTCUSDT', 'ETHUSDT'] if 'BTCUSDT' in available_symbols else available_symbols[:3]
-    print(f"Loading {len(symbols_to_load)} symbols for baseline: {', '.join(symbols_to_load)}")
+    emit_report(f"Loading {len(symbols_to_load)} symbols for baseline: {', '.join(symbols_to_load)}")
     loaded_count = 0
     for symbol in symbols_to_load:
         if symbol not in available_symbols:
             continue
-        print(f"  Loading {symbol}...", end=' ', flush=True)
+        emit_report(f"  Loading {symbol}...", end=' ', flush=True)
         errors = data_loader.load_symbol(symbol, require_liquidity=False)
         if errors:
-            print(f"WARNING: {len(errors)} validation errors")
+            emit_report(f"WARNING: {len(errors)} validation errors")
         else:
-            print("OK")
+            emit_report("OK")
             loaded_count += 1
     
-    print(f"Loaded {loaded_count}/{len(symbols_to_load)} symbols successfully")
+    emit_report(f"Loaded {loaded_count}/{len(symbols_to_load)} symbols successfully")
     
     # Check if we have any loaded symbols
     loaded_symbols = data_loader.get_symbols()
     if not loaded_symbols:
-        print("ERROR: No symbols were loaded successfully!")
+        emit_report("ERROR: No symbols were loaded successfully!")
         return
     
-    print(f"Available symbols for backtest: {', '.join(loaded_symbols)}")
-    print("Running baseline strategies using ORACLE module...")
-    print(f"Start: {start_ts}, End: {end_ts}")
-    print(f"Output: {output_dir}")
-    print()
+    emit_report(f"Available symbols for backtest: {', '.join(loaded_symbols)}")
+    emit_report("Running baseline strategies using ORACLE module...")
+    emit_report(f"Start: {start_ts}, End: {end_ts}")
+    emit_report(f"Output: {output_dir}")
+    emit_report()
     
     baselines = {}
     
     # Run Buy & Hold
-    print("Running Buy & Hold (oracle_mode='always_long')...")
-    print("  [This may take a moment...]", flush=True)
+    emit_report("Running Buy & Hold (oracle_mode='always_long')...")
+    emit_report("  [This may take a moment...]", flush=True)
     try:
         baselines['buy_and_hold'] = run_buy_and_hold(data_loader, start_ts, end_ts, output_dir)
-        print(f"  [OK] Completed")
-        print(f"  Trades: {len(baselines['buy_and_hold'].trades)}")
-        print(f"  Final Equity: ${baselines['buy_and_hold'].portfolio.equity:,.2f}")
-        print(f"  Total Return: {((baselines['buy_and_hold'].portfolio.equity / baselines['buy_and_hold'].portfolio.initial_capital) - 1) * 100:.2f}%")
+        emit_report(f"  [OK] Completed")
+        emit_report(f"  Trades: {len(baselines['buy_and_hold'].trades)}")
+        emit_report(f"  Final Equity: ${baselines['buy_and_hold'].portfolio.equity:,.2f}")
+        emit_report(f"  Total Return: {((baselines['buy_and_hold'].portfolio.equity / baselines['buy_and_hold'].portfolio.initial_capital) - 1) * 100:.2f}%")
     except Exception as e:
-        print(f"  [ERROR] {e}")
+        emit_report(f"  [ERROR] {e}")
         import traceback
         traceback.print_exc()
         baselines['buy_and_hold'] = None
     
-    print()
+    emit_report()
     
     # Run Flat
-    print("Running Flat (oracle_mode='flat')...")
+    emit_report("Running Flat (oracle_mode='flat')...")
     try:
         baselines['flat'] = run_flat(data_loader, start_ts, end_ts, output_dir)
-        print(f"  Trades: {len(baselines['flat'].trades)}")
-        print(f"  Final Equity: ${baselines['flat'].portfolio.equity:,.2f}")
-        print(f"  Total PnL: ${baselines['flat'].portfolio.total_pnl:,.2f}")
+        emit_report(f"  Trades: {len(baselines['flat'].trades)}")
+        emit_report(f"  Final Equity: ${baselines['flat'].portfolio.equity:,.2f}")
+        emit_report(f"  Total PnL: ${baselines['flat'].portfolio.total_pnl:,.2f}")
     except Exception as e:
-        print(f"  Error: {e}")
+        emit_report(f"  Error: {e}")
         import traceback
         traceback.print_exc()
         baselines['flat'] = None
     
-    print()
+    emit_report()
     
     # Run Random
-    print(f"Running Random (oracle_mode='random', seed={args.seed})...")
+    emit_report(f"Running Random (oracle_mode='random', seed={args.seed})...")
     try:
         baselines['random'] = run_random(data_loader, start_ts, end_ts, output_dir, seed=args.seed)
-        print(f"  Trades: {len(baselines['random'].trades)}")
-        print(f"  Final Equity: ${baselines['random'].portfolio.equity:,.2f}")
-        print(f"  Total Return: {((baselines['random'].portfolio.equity / baselines['random'].portfolio.initial_capital) - 1) * 100:.2f}%")
+        emit_report(f"  Trades: {len(baselines['random'].trades)}")
+        emit_report(f"  Final Equity: ${baselines['random'].portfolio.equity:,.2f}")
+        emit_report(f"  Total Return: {((baselines['random'].portfolio.equity / baselines['random'].portfolio.initial_capital) - 1) * 100:.2f}%")
     except Exception as e:
-        print(f"  Error: {e}")
+        emit_report(f"  Error: {e}")
         import traceback
+
         traceback.print_exc()
         baselines['random'] = None
     
-    print()
+    emit_report()
     
     # Generate summary
-    print("Generating summary...")
+    emit_report("Generating summary...")
     valid_baselines = {k: v for k, v in baselines.items() if v is not None}
     if valid_baselines:
         summary_df = generate_summary(valid_baselines, output_dir, data_loader, start_ts, end_ts)
-        print("\nBaseline Summary:")
-        print(summary_df.to_string(index=False))
+        emit_report("\nBaseline Summary:")
+        emit_report(summary_df.to_string(index=False))
         
         # Check Buy & Hold return vs naive return
         if 'buy_and_hold' in valid_baselines and 'return_diff_bps' in summary_df.columns:
             buyhold_row = summary_df[summary_df['strategy'] == 'buy_and_hold'].iloc[0]
             if pd.notna(buyhold_row.get('return_diff_bps')):
                 diff_bps = buyhold_row['return_diff_bps']
-                print(f"\nBuy & Hold vs Naive Return: {diff_bps:.2f} bps difference")
+                emit_report(f"\nBuy & Hold vs Naive Return: {diff_bps:.2f} bps difference")
                 if diff_bps > 50.0:
-                    print(f"  WARNING: Difference exceeds 50 bps tolerance!")
+                    emit_report(f"  WARNING: Difference exceeds 50 bps tolerance!")
                 else:
-                    print(f"  ✓ Within 50 bps tolerance")
+                    emit_report(f"  ✓ Within 50 bps tolerance")
     else:
-        print("No baselines completed successfully")
+        emit_report("No baselines completed successfully")
     
-    print("\nDone!")
+    emit_report("\nDone!")
 
 
 if __name__ == '__main__':

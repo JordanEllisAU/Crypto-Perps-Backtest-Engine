@@ -28,6 +28,14 @@ from engine_core.src.engine import BacktestEngine
 from engine_core.src.reporting import validate_metrics
 from engine_core.tests.fixtures.toy_markets import generate_toy_market
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _gate_log import emit_report, get_logger
+
+log = get_logger("profit_validation_suite")
+
+
 
 SCENARIOS = {
     "UP": {"drift": +0.001, "seed": 1},
@@ -40,6 +48,7 @@ SCENARIOS = {
 def replay_fills(fills_path: Path, initial_capital: float = 100000.0) -> Dict:
     """Lightweight replay of fills.csv returning total_pnl/final_equity/fee/slippage."""
     from scripts.parity_replay import replay_pnl
+
     return replay_pnl(fills_path, initial_capital=initial_capital)
 
 
@@ -252,16 +261,16 @@ def main():
     summary_path = root_out / "profit_validation_summary.csv"
     df.to_csv(summary_path, index=False)
 
-    print(f"\nSummary written to {summary_path}\n")
-    print(df.to_string(index=False))
+    emit_report(f"\nSummary written to {summary_path}\n")
+    emit_report(df.to_string(index=False))
 
     if failures:
-        print("\nFAILURES:")
+        emit_report("\nFAILURES:")
         for f in failures:
-            print(f"  - {f}")
+            emit_report(f"  - {f}")
         sys.exit(1)
 
-    print("\nAll profit validation checks passed.")
+    emit_report("\nAll profit validation checks passed.")
 
 
 if __name__ == "__main__":

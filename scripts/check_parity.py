@@ -8,6 +8,15 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _gate_log import emit_report, get_logger
+
+log = get_logger("check_parity")
+
+
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -164,25 +173,25 @@ def check_parity(metrics_path: Path, replay_path: Path, output_path: Path):
         json.dump(report_serializable, f, indent=2)
     
     # Print summary
-    print("Parity Check Results:")
-    print(f"Overall: {report['parity_check']}")
-    print()
+    emit_report("Parity Check Results:")
+    emit_report(f"Overall: {report['parity_check']}")
+    emit_report()
     for comp in comparisons:
         status = "[PASS]" if comp['pass'] else "[FAIL]"
-        print(f"{status} {comp['metric']}:")
+        emit_report(f"{status} {comp['metric']}:")
         if 'engine' in comp and 'replay' in comp:
-            print(f"  Engine: {comp['engine']}")
-            print(f"  Replay: {comp['replay']}")
-            print(f"  Diff: {comp.get('diff', 0):.2f}")
+            emit_report(f"  Engine: {comp['engine']}")
+            emit_report(f"  Replay: {comp['replay']}")
+            emit_report(f"  Diff: {comp.get('diff', 0):.2f}")
         if 'diff_bps' in comp:
-            print(f"  Diff: {comp['diff_bps']:.2f} bps")
+            emit_report(f"  Diff: {comp['diff_bps']:.2f} bps")
         if 'diff_bps_equity' in comp:
-            print(f"  Diff: {comp['diff_bps_equity']:.2f} bps equity")
+            emit_report(f"  Diff: {comp['diff_bps_equity']:.2f} bps equity")
         if 'max_diff_bps_notional' in comp:
-            print(f"  Max per-trade diff: {comp['max_diff_bps_notional']:.2f} bps notional")
+            emit_report(f"  Max per-trade diff: {comp['max_diff_bps_notional']:.2f} bps notional")
         if 'tolerance' in comp:
-            print(f"  Tolerance: {comp['tolerance']}")
-        print()
+            emit_report(f"  Tolerance: {comp['tolerance']}")
+        emit_report()
     
     return report
 
