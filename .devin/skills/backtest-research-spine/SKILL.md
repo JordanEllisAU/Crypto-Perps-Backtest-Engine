@@ -75,6 +75,11 @@ Every new research artifact under `docs/research/` must include:
 - Risk changes must be validated against `tests/test_accounting_invariants_toy.py` and `tests/test_risk_controls.py`.
 - Any parameter that changes accounting must be behind a feature flag until it passes cross-engine parity.
 
+## Batched execution
+
+- `make ci`, `validate_data_integrity.py`, and baseline runs are sequential gates.
+- External source queries (Context7, DeepWiki, web) for a research question can run in parallel.
+
 ## Cross-repo links
 
 - `DeceptionLeaderBot/.devin/skills/research/mcp-research-toolkit/SKILL.md` for MCP usage.

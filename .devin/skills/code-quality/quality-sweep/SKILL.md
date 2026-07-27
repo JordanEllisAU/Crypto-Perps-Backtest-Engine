@@ -70,6 +70,11 @@ code.
 - Never change leverage, position sizing, margin mode, SL/TP, or fee
   percentages during a sweep.
 
+## Batched execution
+
+- The two `make ci` passes are sequential gates.
+- `QUALITY_LATTICE` and report reads can be parallel; lint checks over non-overlapping file sets may run concurrently.
+
 ## Verification chain
 
 - `python scripts/quality_sweep.py --ci-runs 2`
