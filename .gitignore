@@ -65,6 +65,7 @@ test_run/
 runtime/*
 !runtime/memory/
 !runtime/memory/.gitkeep
+runtime/memory/*.jsonl
 docs/lattices/QUALITY_LATTICE.md
 docs/lattices/QUALITY_LATTICE_*.md
 *.log
