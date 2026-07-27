@@ -322,10 +322,12 @@ def _apply_bare_except_fix(text: str, lines: set[int]) -> str:
         if idx not in lines:
             new_lines.append(line)
             continue
-        match = BARE_EXCEPT_RE.match(line)
+        stripped_line = line.rstrip("\r\n")
+        eol = line[len(stripped_line):]
+        match = BARE_EXCEPT_RE.match(stripped_line)
         if match:
             indent, rest = match.groups()
-            new_lines.append(f"{indent}except Exception:{rest}")
+            new_lines.append(f"{indent}except Exception:{rest}{eol}")
         else:
             new_lines.append(line)
     return "".join(new_lines)
