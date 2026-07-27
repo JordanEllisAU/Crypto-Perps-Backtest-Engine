@@ -179,7 +179,7 @@ def _used_names(tree: ast.AST) -> set[str]:
 
 
 def _imported_aliases(tree: ast.AST) -> list[tuple[str, str, ast.AST]]:
-    """Return list of (alias_name, import_node, parent) for top-level imports."""
+    """Return list of (alias_name, kind, import_node) for top-level imports."""
     aliases: list[tuple[str, str, ast.AST]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -189,7 +189,7 @@ def _imported_aliases(tree: ast.AST) -> list[tuple[str, str, ast.AST]]:
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "*":
-                    issues.append(Issue("WILDCARD_IMPORT", node.lineno, f"wildcard import from {node.module}", sev("WILDCARD_IMPORT", True)))
+                    aliases.append(("*", "wildcard", node))
                 else:
                     name = alias.asname if alias.asname else alias.name
                     aliases.append((name, "from", node))
@@ -306,7 +306,7 @@ def detect_issues(path: Path, text: str, tree: ast.AST, config: dict[str, set[st
                     issues.append(Issue("DANGEROUS_BUILTIN", node.lineno, f"`{func.id}()` call", "warn"))
                 elif func.id in ("getattr", "setattr", "hasattr"):
                     issues.append(Issue("REFLECTION", node.lineno, f"`{func.id}()` call", "warn"))
-                elif func.id in ("breakpoint"):
+                elif func.id == "breakpoint":
                     issues.append(Issue("DEBUGGER", node.lineno, "`breakpoint()` call", "warn"))
 
         elif isinstance(node, ast.Raise):
@@ -326,8 +326,11 @@ def detect_issues(path: Path, text: str, tree: ast.AST, config: dict[str, set[st
 
     # Unused imports (skip files that re-export or use reflection).
     if not has_all and not reflection_file:
-        for name, kind, _ in _imported_aliases(tree):
-            if name not in used and name != "*":
+        for name, kind, node in _imported_aliases(tree):
+            if kind == "wildcard":
+                issues.append(Issue("WILDCARD_IMPORT", node.lineno, f"wildcard import from {node.module}", "warn"))
+                continue
+            if name not in used:
                 issues.append(Issue("UNUSED_IMPORT", 1, f"unused import `{name}`", "info", fixable=True))
 
     return issues
