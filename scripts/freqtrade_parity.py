@@ -320,6 +320,15 @@ from pathlib import Path
 import pandas as pd
 from freqtrade.strategy import IStrategy
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _gate_log import emit_payload, emit_report, get_logger
+
+log = get_logger("freqtrade_parity")
+
+
+
 
 class EngineParityStrategy(IStrategy):
     timeframe = "{timeframe}"
@@ -633,13 +642,13 @@ def compare_results(
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
 
-    print("Freqtrade parity report:")
-    print(f"  Overall: {report['parity_check']}")
+    emit_report("Freqtrade parity report:")
+    emit_report(f"  Overall: {report['parity_check']}")
     for c in comparisons:
         status = "[PASS]" if c["pass"] else "[FAIL]"
         ft_val = c.get("freqtrade", c.get("replay"))
-        print(f"  {status} {c['metric']}: engine={c['engine']:.6f} freqtrade={ft_val:.6f} diff={c['diff']:.6f}")
-    print(f"  Report written to: {report_path}")
+        emit_report(f"  {status} {c['metric']}: engine={c['engine']:.6f} freqtrade={ft_val:.6f} diff={c['diff']:.6f}")
+    emit_report(f"  Report written to: {report_path}")
     return report
 
 
@@ -665,7 +674,7 @@ def run_freqtrade_backtest(output_dir: Path, fee: float, timerange: Optional[str
     if timerange:
         cmd.extend(["--timerange", timerange])
 
-    print("Running:", " ".join(cmd))
+    emit_report("Running:", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=False, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"freqtrade backtest failed (exit {result.returncode})")
@@ -699,7 +708,7 @@ def main():
     args = parser.parse_args()
 
     summary = export_freqtrade_userdata(args)
-    print(json.dumps(summary, indent=2))
+    emit_payload(summary)
 
     if args.command == "run":
         run_freqtrade_backtest(

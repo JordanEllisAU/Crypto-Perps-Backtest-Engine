@@ -7,6 +7,15 @@ import json
 from pathlib import Path
 import pandas as pd
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _gate_log import emit_report, get_logger
+
+log = get_logger("export_signals")
+
+
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -41,7 +50,7 @@ def export_signals(artifacts_dir: Path, output_path: Path):
     
     signals_df = pd.DataFrame(signals)
     signals_df.to_csv(output_path, index=False)
-    print(f"Exported {len(signals_df)} signals to {output_path}")
+    emit_report(f"Exported {len(signals_df)} signals to {output_path}")
     
     return signals_df
 

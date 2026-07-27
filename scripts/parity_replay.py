@@ -7,6 +7,14 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _gate_log import emit_report, get_logger
+
+log = get_logger("parity_replay")
+
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -149,14 +157,15 @@ def main():
     
     # Save results
     import json
+
     output_path = Path(args.output)
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=2, default=str)
     
-    print(f"Replay results saved to {output_path}")
-    print(f"Total PnL: ${results['total_pnl']:,.2f}")
-    print(f"Final Equity: ${results['final_equity']:,.2f}")
-    print(f"Number of Trades: {results['num_trades']}")
+    emit_report(f"Replay results saved to {output_path}")
+    emit_report(f"Total PnL: ${results['total_pnl']:,.2f}")
+    emit_report(f"Final Equity: ${results['final_equity']:,.2f}")
+    emit_report(f"Number of Trades: {results['num_trades']}")
 
 
 if __name__ == '__main__':

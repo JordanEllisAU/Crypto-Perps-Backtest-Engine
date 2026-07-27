@@ -14,6 +14,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from engine_core.src.data.loader import DataLoader
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _gate_log import emit_report, get_logger
+
+log = get_logger("validate_data_integrity")
+
+
+
 def validate_symbol(symbol: str, df: pd.DataFrame, interval_min: int = 15) -> dict:
     """
     Run validation checks on a single symbol dataframe.
@@ -125,7 +134,7 @@ def main():
     else:
         symbols = args.symbols.split(',')
         
-    print(f"Validating {len(symbols)} symbols...")
+    emit_report(f"Validating {len(symbols)} symbols...")
     
     # Dates
     start_ts = pd.Timestamp(args.start_date, tz='UTC') if args.start_date else None
@@ -137,16 +146,16 @@ def main():
     failed_symbols = []
     
     for symbol in symbols:
-        print(f"Checking {symbol}...", end=" ")
+        emit_report(f"Checking {symbol}...", end=" ")
         errors = loader.load_symbol(symbol, require_liquidity=False)
         if errors:
-            print(f"LOAD ERROR: {errors}")
+            emit_report(f"LOAD ERROR: {errors}")
             failed_symbols.append(symbol)
             continue
             
         df = loader.get_15m_bars(symbol)
         if df is None or df.empty:
-            print("EMPTY")
+            emit_report("EMPTY")
             continue
             
         issues = validate_symbol(symbol, df)
@@ -161,10 +170,10 @@ def main():
         if not issues.get('utc_aligned', True): failed = True
         
         if failed:
-            print("FAIL")
+            emit_report("FAIL")
             failed_symbols.append(symbol)
         else:
-            print("OK")
+            emit_report("OK")
             
     # Report generation
     artifacts_dir = Path("artifacts")
@@ -204,19 +213,19 @@ def main():
     if rows:
         pd.DataFrame(rows).to_csv(flags_path, index=False)
         
-    print(f"\nReport saved to {report_path}")
-    print(f"Flags CSV saved to {flags_path}")
+    emit_report(f"\nReport saved to {report_path}")
+    emit_report(f"Flags CSV saved to {flags_path}")
     
     # Print summary
     total_duplicates = sum(iss.get('duplicates', 0) for iss in all_issues.values())
     total_nans = sum(sum(iss.get('nans', {}).values()) for iss in all_issues.values())
     total_ohlc_violations = sum(iss.get('ohlc_violations', 0) for iss in all_issues.values())
     
-    print(f"\nSummary:")
-    print(f"  Total duplicates: {total_duplicates}")
-    print(f"  Total NaNs: {total_nans}")
-    print(f"  Total OHLC violations: {total_ohlc_violations}")
-    print(f"  Failed symbols: {len(failed_symbols)}")
+    emit_report(f"\nSummary:")
+    emit_report(f"  Total duplicates: {total_duplicates}")
+    emit_report(f"  Total NaNs: {total_nans}")
+    emit_report(f"  Total OHLC violations: {total_ohlc_violations}")
+    emit_report(f"  Failed symbols: {len(failed_symbols)}")
     
     if failed_symbols:
         sys.exit(1)

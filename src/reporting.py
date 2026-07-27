@@ -2,6 +2,7 @@
 import logging
 import pandas as pd
 import json
+import warnings
 from pathlib import Path
 from typing import List, Dict, Optional, Union, Any
 from dataclasses import dataclass
@@ -785,8 +786,11 @@ class ReportGenerator:
                                     slip_p95 = float(slip_values.quantile(0.95))
                                     slip_max = float(slip_values.max())
                                     slip_nonzero_share = float((slip_values.abs() > 1e-9).mean())
-                    except Exception:
-                        pass  # Keep default slippage values if fills.csv not available
+                    except Exception as e:
+                        # Keep default slippage values, but do not do it silently:
+                        # zeroed slippage stats in metrics.json are otherwise
+                        # indistinguishable from a genuinely frictionless run.
+                        warnings.warn(f"Slippage stats unavailable, reporting defaults: {e}")
                     
         except Exception as e:
             # Log error but continue with fallback
@@ -994,8 +998,10 @@ class ReportGenerator:
                             wins = (df_trades_fallback['pnl_net_usd'] > 0).sum()
                             total_trades_fallback = len(df_trades_fallback)
                             win_rate = wins / total_trades_fallback if total_trades_fallback > 0 else 0.0
-                except Exception:
-                    pass  # Keep win_rate = 0.0 if trades.csv not available
+                except Exception as e:
+                    # A reported win_rate of 0.0 must not be able to mean
+                    # "the fallback threw" as well as "no winning trades".
+                    warnings.warn(f"win_rate fallback failed, reporting 0.0: {e}")
         
         # Slippage degeneracy calculation from fills.csv (SSOT requirement)
         # Calculate from fills.csv: if > 20 non-zero observations and > 95% have exact same value → True
@@ -1021,9 +1027,11 @@ class ReportGenerator:
                                     'total_nonzero': len(non_zero_slip),
                                     'pct_same': float(most_common_pct)
                                 }
-        except Exception:
-            # If fills.csv not available or error, keep default False
-            pass
+        except Exception as e:
+            # The degeneracy check is a *validation* signal. Swallowing the
+            # error leaves it reporting "no degeneracy" when in fact it never
+            # ran — a check that cannot fail is worse than no check.
+            warnings.warn(f"Slippage degeneracy check did not run: {e}")
         
         # FIX 3: Exposure % - count bars where positions were open
         exposure_pct = 0.0
@@ -1411,8 +1419,10 @@ class ReportGenerator:
                                     f"Sanity check: avg_r is 0.0 but {len(valid_risk)} trades have valid initial_risk_usd. "
                                     f"This may indicate a calculation error."
                                 )
-                except Exception:
-                    pass  # Don't fail if we can't check
+                except Exception as e:
+                    # Never fail the run on a sanity check, but never let the
+                    # check go missing in silence either.
+                    warnings.warn(f"avg_r sanity check did not run: {e}")
             
             # Check 8: hit_ratio_per_module should not be empty if trades exist
             hit_ratio = metrics.get('hit_ratio_per_module', {})
@@ -1438,8 +1448,8 @@ class ReportGenerator:
                                     f"Sanity check: avg_trade_duration_bars is 0.0 but {len(valid_age)} trades have valid age_bars. "
                                     f"This may indicate a calculation error."
                                 )
-                except Exception:
-                    pass  # Don't fail if we can't check
+                except Exception as e:
+                    warnings.warn(f"avg_trade_duration_bars sanity check did not run: {e}")
     
     def _validate_metrics(self, metrics: Dict) -> None:
         """
@@ -2034,8 +2044,10 @@ class ReportGenerator:
                 try:
                     positions_df = pd.read_csv(positions_path)
                     positions_history = positions_df.to_dict('records')
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Trades are still rebuilt without position history, but the
+                    # degraded reconstruction should be visible in the run log.
+                    warnings.warn(f"positions.csv unreadable, rebuilding trades without it: {e}")
             df = self._build_trades_from_fills(fills_df, ledger_df, trades, positions_history)
         elif not trades:
             df = pd.DataFrame(columns=[
@@ -2171,8 +2183,10 @@ class ReportGenerator:
                                    capture_output=True, text=True, cwd=Path(__file__).parent.parent)
             if result.returncode == 0:
                 git_commit = result.stdout.strip()
-        except Exception:
-            pass
+        except Exception as e:
+            # The manifest is the provenance record for a run; a missing commit
+            # should be noted rather than silently absent from it.
+            warnings.warn(f"Could not resolve git commit for run manifest: {e}")
         
         manifest = {
             'run_id': run_id,
