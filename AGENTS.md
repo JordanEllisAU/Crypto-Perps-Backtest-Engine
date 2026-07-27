@@ -13,6 +13,19 @@ These directives are mandatory for all agents working in this repository. They r
 - No session/chat artifacts in commits (`.claude/*.json`, `.vscode/`, `.playwright-mcp/`, scratch files).
 - Document root cause, not just the fix.
 
+## Research and data integrity
+
+- Start every research task with the backtest research spine: `.devin/skills/backtest-research-spine/SKILL.md`.
+- Run `scripts/validate_data_integrity.py` and `make ci` before wiring a new signal or parameter into the engine.
+- Use MCP tools (`context7` for library docs, `deepwiki` for repo architecture, `parallel` for live web research) and record a source corpus in every research artifact.
+- Cross-reference DeceptionLeaderBot research findings in `DeceptionLeaderBot/docs/research/` before changing shared primitives.
+
+## Quality sweep
+
+- Run the local A+ sweep before every PR: `python scripts/quality_sweep.py --ci-runs 2`.
+- See `.devin/skills/code-quality/quality-sweep/SKILL.md` for the full sweep protocol, rule table, and auto-fix guidance.
+- Do not auto-fix `src/` modules that touch accounting invariants, margin math, fee models, or fill simulation without a regression test.
+
 ## Workspace process
 
 - Batch related changes into one PR; see `.github/PULL_REQUEST_TEMPLATE.md` and `CONTRIBUTING.md`.
