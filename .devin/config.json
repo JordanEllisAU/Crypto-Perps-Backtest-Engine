@@ -5,11 +5,8 @@
       "args": ["-y", "mcp-remote", "https://search.parallel.ai/mcp"]
     },
     "memory": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-memory"],
-      "env": {
-        "MEMORY_FILE_PATH": "runtime/memory/session.jsonl"
-      }
+      "command": "bash",
+      "args": [".devin/mcp-memory.sh"]
     },
     "sequential-thinking": {
       "command": "npx",
