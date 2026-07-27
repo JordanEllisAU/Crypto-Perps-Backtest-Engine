@@ -8,7 +8,7 @@
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-memory"],
       "env": {
-        "MEMORY_FILE_PATH": ".devin/memory.jsonl"
+        "MEMORY_FILE_PATH": "runtime/memory/session.jsonl"
       }
     },
     "sequential-thinking": {
