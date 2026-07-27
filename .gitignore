@@ -62,7 +62,9 @@ artifacts/
 runs/
 test_debug/
 test_run/
-runtime/
+runtime/*
+!runtime/memory/
+!runtime/memory/.gitkeep
 docs/lattices/QUALITY_LATTICE.md
 docs/lattices/QUALITY_LATTICE_*.md
 *.log
