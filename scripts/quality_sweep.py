@@ -4,14 +4,13 @@
 Runs ``make ci`` twice, scans for slop/placeholder/junk/bad code, applies safe
 auto-fixes, and produces a module lattice/index.
 
-Usage: python scripts/quality_sweep.py [--apply] [--strict] [--ci-runs N]
+Usage: python scripts/quality_sweep.py [--apply] [--aggressive] [--strict] [--ci-runs N]
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
-import datetime
 import json
 import logging
 import re
@@ -65,6 +64,7 @@ REPO_CONFIG = {
 
 PLACEHOLDER_RE = re.compile(r"#.*\b(TODO|FIXME|XXX|HACK)\b", re.IGNORECASE)
 TYPE_IGNORE_RE = re.compile(r"#\s*type:\s*ignore\b(?![\t ]+[A-Za-z0-9])")
+BARE_EXCEPT_RE = re.compile(r"^(\s*)except\s*:(.*)$")
 
 
 @dataclass
@@ -150,14 +150,7 @@ def make_ci(runs: int) -> list[dict[str, object]]:
     for i in range(1, runs + 1):
         logger.info("Running make ci (pass %d/%d)", i, runs)
         result = subprocess.run(["make", "ci"], cwd=ROOT, capture_output=True, text=True, check=False)
-        results.append(
-            {
-                "pass": i,
-                "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            }
-        )
+        results.append({"pass": i, "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
         if result.returncode != 0:
             logger.error("make ci pass %d failed", i)
             break
@@ -241,12 +234,6 @@ def detect_issues(path: Path, text: str, tree: ast.AST, config: dict[str, set[st
     prod = is_production(path, config)
     lines = text.splitlines()
 
-    def sev(rule: str, is_bad: bool) -> str:
-        if is_bad or prod:
-            return "error"
-        return "info"
-
-    # Whole-text pattern checks (limited to comments).
     for m in PLACEHOLDER_RE.finditer(text):
         line = text[: m.start()].count("\n") + 1
         issues.append(Issue("TODO_COMMENT", line, f"{m.group(1)} comment", "info"))
@@ -255,7 +242,6 @@ def detect_issues(path: Path, text: str, tree: ast.AST, config: dict[str, set[st
         line = text[: m.start()].count("\n") + 1
         issues.append(Issue("TYPE_IGNORE", line, "unqualified `type: ignore`", "info"))
 
-    # AST-based checks.
     used = _used_names(tree)
     reflection_file = _has_reflection(text)
     has_all = "__all__" in text
@@ -268,13 +254,11 @@ def detect_issues(path: Path, text: str, tree: ast.AST, config: dict[str, set[st
             if _is_placeholder_body(node.body):
                 issues.append(Issue("PLACEHOLDER", node.lineno, "empty/placeholder function body", "warn"))
 
-            # mutable default arguments
             defaults = list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]
             for d in defaults:
                 if isinstance(d, ast.List | ast.Dict | ast.Set):
                     issues.append(Issue("MUTABLE_DEFAULT", d.lineno, "mutable default argument", "warn", fixable=False))
 
-            # global in function
             for child in ast.walk(node):
                 if isinstance(child, ast.Global):
                     issues.append(Issue("GLOBAL_IN_FUNC", child.lineno, "`global` in function", "warn"))
@@ -288,16 +272,12 @@ def detect_issues(path: Path, text: str, tree: ast.AST, config: dict[str, set[st
             if node.type is None:
                 issues.append(Issue("BARE_EXCEPT", node.lineno, "bare `except:`", "error", fixable=True))
             elif _is_silent_except(node):
-                # silent except is a strong code-smell but legacy ignoring is common;
-                # default warning; use --strict for A+ hard enforcement.
                 issues.append(Issue("SILENT_EXCEPT", node.lineno, "silent exception swallow", "warn"))
 
         elif isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name):
                 if func.id == "print":
-                    # print() is a hard error in production modules except the
-                    # interactive CLI surface (core/launcher and launcher.py).
                     rel_posix = path.relative_to(ROOT).as_posix()
                     allowed_print = rel_posix.startswith("core/launcher") or rel_posix == "launcher.py" or rel_posix.startswith("scripts/")
                     print_sev = "warn" if allowed_print else ("error" if prod else "warn")
@@ -324,14 +304,14 @@ def detect_issues(path: Path, text: str, tree: ast.AST, config: dict[str, set[st
             if node.id == "Any":
                 issues.append(Issue("ANY_TYPE", node.lineno, "`Any` type annotation", "warn"))
 
-    # Unused imports (skip files that re-export or use reflection).
     if not has_all and not reflection_file:
         for name, kind, node in _imported_aliases(tree):
             if kind == "wildcard":
-                issues.append(Issue("WILDCARD_IMPORT", node.lineno, f"wildcard import from {node.module}", "warn"))
+                mod = node.module or "."
+                issues.append(Issue("WILDCARD_IMPORT", node.lineno, f"wildcard import from {mod}", "warn"))
                 continue
             if name not in used:
-                issues.append(Issue("UNUSED_IMPORT", 1, f"unused import `{name}`", "info", fixable=True))
+                issues.append(Issue("UNUSED_IMPORT", 1, f"unused import `{name}`", "info"))
 
     return issues
 
@@ -342,10 +322,9 @@ def _apply_bare_except_fix(text: str, lines: set[int]) -> str:
         if idx not in lines:
             new_lines.append(line)
             continue
-        stripped = line.lstrip()
-        if stripped.startswith("except:") or stripped.startswith("except :"):
-            indent = line[: len(line) - len(stripped)]
-            rest = stripped[len("except:") :]
+        match = BARE_EXCEPT_RE.match(line)
+        if match:
+            indent, rest = match.groups()
             new_lines.append(f"{indent}except Exception:{rest}")
         else:
             new_lines.append(line)
@@ -370,47 +349,22 @@ def _apply_whitespace_fix(text: str) -> str:
     return text
 
 
-def apply_safe_fixes(path: Path, issues: list[Issue], apply: bool) -> tuple[str, list[str]]:
+def apply_safe_fixes(path: Path, issues: list[Issue], apply: bool, aggressive: bool, config: dict[str, set[str] | list[str]]) -> tuple[str, list[str]]:
     if not apply or not issues:
         return path.read_text(encoding="utf-8", errors="ignore"), []
 
     text = path.read_text(encoding="utf-8", errors="ignore")
     applied: list[str] = []
+    prod = is_production(path, config)
 
     rules = {i.rule for i in issues}
-    if "BARE_EXCEPT" in rules:
+    if "BARE_EXCEPT" in rules and (aggressive or not prod):
         bare_lines = {i.line for i in issues if i.rule == "BARE_EXCEPT"}
         text = _apply_bare_except_fix(text, bare_lines)
         applied.append("BARE_EXCEPT")
 
-    if any(i.rule in ("TODO_COMMENT", "TYPE_IGNORE", "PRINT", "LONG_FUNCTION") for i in issues):
-        # whitespace fix is unconditional and safe
-        pass
     text = _apply_whitespace_fix(text)
     applied.append("WHITESPACE")
-
-    # Unused import removal: remove whole top-level import statements when every
-    # alias in the statement is unused. Partial cleanup is left for manual review.
-    if "UNUSED_IMPORT" in rules:
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
-            tree = None
-        if tree is not None:
-            unused_names = {i.message.split("`")[1] for i in issues if i.rule == "UNUSED_IMPORT" and "`" in i.message}
-            used = _used_names(tree)
-            new_text_lines = text.splitlines(keepends=True)
-            removed: set[int] = set()
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import | ast.ImportFrom):
-                    aliases = [a.asname if a.asname else (a.name.split(".")[0] if isinstance(node, ast.Import) else a.name) for a in node.names]
-                    if all(a in unused_names and a not in used for a in aliases):
-                        for lineno in range(node.lineno, (node.end_lineno or node.lineno) + 1):
-                            removed.add(lineno)
-            if removed:
-                new_text_lines = [line for idx, line in enumerate(new_text_lines, start=1) if idx not in removed]
-                text = "".join(new_text_lines)
-                applied.append("UNUSED_IMPORT")
     return text, applied
 
 
@@ -446,8 +400,7 @@ def trust_tier(info: ModuleInfo) -> str:
 
 
 def build_lattice(modules: list[ModuleInfo]) -> str:
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    out: list[str] = ["# Module Quality Lattice", f"Generated: {timestamp}", "| module | lane | sloc | func_count | max_func_sloc | line_limit | trust | issues |", "|---|---|---:|---:|---:|:---:|:---:|---|"]
+    out: list[str] = ["# Module Quality Lattice", "| module | lane | sloc | func_count | max_func_sloc | line_limit | trust | issues |", "|---|---|---:|---:|---:|:---:|:---:|---|"]
     for info in sorted(modules, key=lambda m: (m.lane, m.rel)):
         line_ok = "OK" if info.sloc <= LINE_LIMIT else f"OVER {LINE_LIMIT}"
         func_ok = "OK" if info.max_func_sloc <= FUNC_LIMIT else f"OVER {FUNC_LIMIT}"
@@ -462,12 +415,10 @@ def write_report(modules: list[ModuleInfo], ci_results: list[dict[str, object]])
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     LATTICE_DIR.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    lattice_path = LATTICE_DIR / f"QUALITY_LATTICE_{timestamp}.md"
+    lattice_path = LATTICE_DIR / "QUALITY_LATTICE.md"
     lattice_path.write_text(build_lattice(modules), encoding="utf-8")
 
     report = {
-        "timestamp": timestamp,
         "ci_results": [{"pass": r["pass"], "returncode": r["returncode"]} for r in ci_results],
         "modules": [
             {
@@ -478,19 +429,14 @@ def write_report(modules: list[ModuleInfo], ci_results: list[dict[str, object]])
                 "max_func_sloc": m.max_func_sloc,
                 "trust_tier": m.trust_tier,
                 "issues": [
-                    {
-                        "rule": i.rule,
-                        "line": i.line,
-                        "message": i.message,
-                        "severity": i.severity,
-                    }
+                    {"rule": i.rule, "line": i.line, "message": i.message, "severity": i.severity}
                     for i in m.issues
                 ],
             }
             for m in modules
         ],
     }
-    report_path = RUNTIME_DIR / f"quality_sweep_report_{timestamp}.json"
+    report_path = RUNTIME_DIR / "quality_sweep_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     logger.info("Lattice written to %s", lattice_path.relative_to(ROOT))
@@ -500,6 +446,7 @@ def write_report(modules: list[ModuleInfo], ci_results: list[dict[str, object]])
 def main() -> int:
     parser = argparse.ArgumentParser(description="Local A+ quality sweep")
     parser.add_argument("--apply", action="store_true", help="Apply safe auto-fixes")
+    parser.add_argument("--aggressive", action="store_true", help="Apply fixes in production modules too")
     parser.add_argument("--skip-ci", action="store_true", help="Skip make ci baseline")
     parser.add_argument("--ci-runs", type=int, default=2, help="Times to run make ci")
     parser.add_argument("--strict", action="store_true", help="Treat warnings as failures")
@@ -529,7 +476,7 @@ def main() -> int:
         for info in modules:
             if not info.issues:
                 continue
-            new_text, applied = apply_safe_fixes(info.path, info.issues, True)
+            new_text, applied = apply_safe_fixes(info.path, info.issues, True, args.aggressive, config)
             if applied:
                 info.path.write_text(new_text, encoding="utf-8")
                 fixed_count += 1

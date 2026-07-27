@@ -60,6 +60,7 @@ runs/
 test_debug/
 test_run/
 runtime/
+docs/lattices/QUALITY_LATTICE.md
 docs/lattices/QUALITY_LATTICE_*.md
 *.log
 test_output.txt
