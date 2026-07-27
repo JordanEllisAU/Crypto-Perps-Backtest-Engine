@@ -37,6 +37,7 @@ If any of these fail, fix data/bugs before researching new edges.
 
 | Question | First-pass tool | Fallback |
 |----------|-----------------|----------|
+| Prior findings on this signal, invariant, or parameter | `mcp_tool` server=`memory` `search_nodes` + `open_nodes` | `Crypto-Perps-Backtest-Engine/docs/` and `DeceptionLeaderBot/docs/research/` |
 | `pandas` / `numpy` / `pytest` API | `mcp_tool` server=`context7` | Official docs + `web_search` |
 | `freqtrade` architecture / config | `mcp_tool` server=`deepwiki` repo=`freqtrade/freqtrade` | `freqtrade.io` docs |
 | `ccxt` data conventions, fees, contract sizes | `mcp_tool` server=`deepwiki` repo=`ccxt/ccxt` | CCXT docs |
@@ -46,15 +47,16 @@ If any of these fail, fix data/bugs before researching new edges.
 ## Research procedure
 
 1. State the hypothesis in falsifiable form (e.g., "High quote-OI coins have lower 60m forward range").
-2. Lock the dataset: record path, date range, symbols, bar interval.
-3. Run `validate_data_integrity.py` and paste the PASS/FAIL line.
-4. Compute the signal on historical bars using a standalone script (not inside the live engine).
-5. Run a forward-test with `metric_edge_forward_test.py` logic or equivalent:
+2. Search memory (`mcp_tool` server=`memory` `search_nodes`) for prior findings on the same signal, invariant, or parameter and open any relevant entities.
+3. Lock the dataset: record path, date range, symbols, bar interval.
+4. Run `validate_data_integrity.py` and paste the PASS/FAIL line.
+5. Compute the signal on historical bars using a standalone script (not inside the live engine).
+6. Run a forward-test with `metric_edge_forward_test.py` logic or equivalent:
    - Spearman correlation vs forward return / range.
    - Top-vs-bottom decile edge.
    - Signed-return predictability.
-6. If the edge is stable across at least 3 independent trials, document it in `docs/research/`.
-7. If the edge is to be wired into the engine, add a shadow flag first and run `make ci`.
+7. If the edge is stable across at least 3 independent trials, document it in `docs/research/`.
+8. If the edge is to be wired into the engine, add a shadow flag first and run `make ci`.
 
 ## Research artifact format
 

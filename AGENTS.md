@@ -16,8 +16,9 @@ These directives are mandatory for all agents working in this repository. They r
 ## Research and data integrity
 
 - Start every research task with the backtest research spine: `.devin/skills/backtest-research-spine/SKILL.md`.
+- Search the memory MCP (`.devin/skills/memory/SKILL.md`) for prior findings on the same signal, invariant, or parameter before starting new research.
 - Run `scripts/validate_data_integrity.py` and `make ci` before wiring a new signal or parameter into the engine.
-- Use MCP tools (`context7` for library docs, `deepwiki` for repo architecture, `parallel` for live web research) and record a source corpus in every research artifact.
+- Use MCP tools (`context7` for library docs, `deepwiki` for repo architecture, `parallel` for live web research, `memory` for prior findings) and record a source corpus in every research artifact.
 - Cross-reference DeceptionLeaderBot research findings in `DeceptionLeaderBot/docs/research/` before changing shared primitives.
 
 ## Quality sweep
