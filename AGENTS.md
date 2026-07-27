@@ -32,6 +32,12 @@ These directives are mandatory for all agents working in this repository. They r
 - Delete merged remote branches promptly; use `python scripts/workspace_health_report.py` to find candidates.
 - Reusable trading primitives that overlap with `DeceptionLeaderBot` should be proposed as a shared library, not copy-pasted.
 
+## Parallel & batch tool-calling
+
+- Batch independent reads, searches, dry-run checks, and MCP lookups in parallel. Keep ordered gates (`make ci`, `validate_data_integrity.py`, baseline runs) sequential.
+- Use `asyncio.gather` or `ThreadPoolExecutor` with bounded concurrency for independent I/O in scripts.
+- Never parallelize destructive or data-modifying operations.
+
 Full rule files:
 - `.cursor/rules/anti-circular-debug.mdc`
 - `.claude/rules/anti-circular-debug.md`
