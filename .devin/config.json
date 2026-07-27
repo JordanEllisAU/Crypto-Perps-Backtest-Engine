@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "parallel": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://search.parallel.ai/mcp"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_FILE_PATH": ".devin/memory.jsonl"
+      }
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+    }
+  }
+}

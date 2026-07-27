@@ -54,6 +54,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# MCP runtime memory files
+.devin/memory*.jsonl
+
 # Engine-specific artifacts
 artifacts/
 runs/
