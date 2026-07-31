@@ -17,18 +17,20 @@ scope: workspace
 
 ## Inputs
 
-- `topic` — what to build/improve (e.g., "best MEXC position sync", "cleanest task-ranking UI").
-- `repo` — auto-detected from `git remote -v` in the current directory; override with `owner/repo` if wrong.
+- `topic` — what to build/improve.
+- `repo` — auto-detected from `git remote -v` in the current directory; do not override except to fix a wrong detection.
+- `run_tag` — optional unique tag if the same topic is run again (default: none).
 - `timebox` — default `2 hours`.
-- `constraints` — optional guardrails (read `AGENTS.md` / `README.md` and list `NEVER TOUCH` values).
+- `constraints` — optional guardrails (read `AGENTS.md` / `README.md` and list `NEVER TOUCH`/protected paths and safety rules).
 
 ## 1. Pre-flight
 
 1. Capture `topic` from the slash command.
 2. Detect repo: `git remote -v` or current working directory.
-3. Read `AGENTS.md` and `README.md` if they exist; record repo-specific `NEVER TOUCH` values and safety rules.
-4. Create `docs/competitions/{slug}/` (slug = `{repo}-{topic}-YYYYMMDD`) and write `BRIEF.md` with:
-   - Topic, repo, timebox, constraints
+3. Read `AGENTS.md` and `README.md` if they exist; record repo-specific `NEVER TOUCH` values, protected paths, and safety rules in `constraints`.
+4. Derive a deterministic slug: `{repo}-{topic}` normalized (lowercase, alphanumerics/hyphens). If `run_tag` is given, append `-{run_tag}`. If the directory already exists, append `-2`, `-3`, etc.
+5. Create `docs/competitions/{slug}/` and write `BRIEF.md` with:
+   - Topic, repo, timebox, constraints, slug
    - Judging rubric:
      | Criterion | Weight |
      |---|---|
@@ -37,11 +39,11 @@ scope: workspace
      | Code clarity & maintainability | 20% |
      | Evidence & citations | 20% |
      | Git cleanliness | 10% |
-5. `git status --short` must be clean-ish. If there are uncommitted user changes, do not stage them; only the campaign files will be committed by the agents.
+6. `git status --short` must be clean-ish. If there are uncommitted user changes, do not stage them; only the campaign files will be committed by the orchestrator.
 
 ## 2. Spawn the three competitors
 
-Use `devin_mcp` → `devin_session_create` with `devin_mode="lite"` (or `run_subagent` with `model="swe-1-7"` if available). Launch in parallel.
+Use `devin_mcp` → `devin_session_create` with `devin_mode="lite"` (or `run_subagent` with `model="swe-1-7"` if available). Launch in parallel. Each subagent runs in an isolated session with its own repo clone.
 
 | Agent | Edge |
 |---|---|
@@ -61,18 +63,19 @@ CONSTRAINTS: {constraints}
 GOAL: Build the best system for the topic. Friendly but fierce — outperform the other two agents on the rubric, stay professional.
 
 RULES:
-- Work only in the assigned repo.
-- FULL CARTE BLANCHE: use every Devin tool, every MCP server, every file in the repo, and any source on the open web — but stop before any repo `AGENTS.md` `NEVER TOUCH` value or safety rule.
+- Work only in the assigned repo. You are on an isolated machine; do not touch the other agents' branches or PRs.
+- FULL RESEARCH CARTE BLANCHE: use every Devin tool, every MCP server, and any source on the open web to research and read the repo. You may read any file.
+- MODIFICATIONS respect repo `AGENTS.md`, `NEVER TOUCH` values, and protected paths. Do not directly edit protected files (e.g., runtime game files, `.env`, secrets); route changes through the repo's approved builders/ship tools.
 - Cite evidence for every design choice and every factual claim.
 - WORK CLEAN ON GIT:
   * Branch: `devin/compete-{slug}-{agent}`
-  * Commit often with clear messages
+  * Run the repo's lint/test/build gates (e.g., `make ci` / `make lint` / `make test`) before each commit
+  * Commit only after gates pass; commit often with clear messages
   * Open a PR against the repo default branch when done
   * Never force push, never commit to `main`/`master`, never touch secrets
-- Respect repo `AGENTS.md`, `NEVER TOUCH` values, and safety rules.
-- Do not modify the other agents' branches or PRs.
+- Do not modify `docs/competitions/{slug}/` or the other agents' branches/PRs.
 - Stop when timebox expires or a PR is ready — whichever comes first.
-- Return: PR URL, summary, and self-score against the rubric.
+- Return: PR URL, branch name, summary, self-score against the rubric, and the exact gate commands you ran with exit codes.
 ```
 
 Record session IDs and branch names in `docs/competitions/{slug}/COMPETITORS.md`.
@@ -86,8 +89,8 @@ Record session IDs and branch names in `docs/competitions/{slug}/COMPETITORS.md`
 ## 4. Gather submissions
 
 1. `devin_session_interact` → `get_messages` and `get_attachments` for each child.
-2. `ROUNDUP.md` with PR URL, files changed, summary, self-score.
-3. Review each PR diff locally.
+2. `ROUNDUP.md` with PR URL, branch, files changed, summary, self-score, gate results.
+3. For each PR, check out the branch locally and run the repo's lint/test/build gates. Record exit codes.
 
 ## 5. Judging
 
@@ -98,14 +101,17 @@ Write `docs/competitions/{slug}/JUDGE.md`:
 - Optional: if user asked, create a synthesis branch `devin/compete-{slug}-synthesis` and PR combining the best pieces.
 - Label all compete PRs with `compete-{slug}`.
 
-## 6. Final report
+## 6. Final report and verification
+
+Run the repo gates on each competitor branch and on the synthesis branch (if any). Record every command and exit code.
 
 Return to user:
-- Three PR links.
+- Three PR links and the synthesis PR link (if any).
+- Gate results per branch.
 - Winner and why.
 - One-paragraph critique per entry.
 - Any risks/follow-ups.
-- `PASS` with winner/synthesis PR link.
+- `PASS` only if the winning PR/synthesis PR passes all repo gates; otherwise `FAIL` or `UNVERIFIED`.
 
 ## Hard stops
 
@@ -113,3 +119,4 @@ Return to user:
 - No live trading restarts, no production service mutations.
 - Never change repo `NEVER TOUCH` values without explicit user approval.
 - No secrets, no `.env`, no direct `main`/`master` commits.
+- Do not edit protected paths listed in repo `AGENTS.md`; use approved builder/ship tools.
