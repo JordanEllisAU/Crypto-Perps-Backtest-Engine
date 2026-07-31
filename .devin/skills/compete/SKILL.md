@@ -28,8 +28,9 @@ scope: workspace
 1. Capture `topic` from the slash command.
 2. Detect repo: `git remote -v` or current working directory.
 3. Read `AGENTS.md` and `README.md` if they exist; record repo-specific `NEVER TOUCH` values, protected paths, and safety rules in `constraints`.
-4. Derive a deterministic slug: `{repo}-{topic}` normalized (lowercase, alphanumerics/hyphens). If `run_tag` is given, append `-{run_tag}`. If the directory already exists, append `-2`, `-3`, etc.
-5. Create `docs/competitions/{slug}/` and write `BRIEF.md` with:
+4. Check workspace cleanliness: `git status --short` before creating any campaign files. If there are uncommitted user changes outside `docs/competitions/`, stop and ask before continuing.
+5. Derive a deterministic slug: `{repo}-{topic}` normalized (lowercase, alphanumerics/hyphens). If `run_tag` is given, append `-{run_tag}`. If the directory already exists, append `-2`, `-3`, etc.
+6. Create `docs/competitions/{slug}/` and write `BRIEF.md` with:
    - Topic, repo, timebox, constraints, slug
    - Judging rubric:
      | Criterion | Weight |
@@ -39,7 +40,7 @@ scope: workspace
      | Code clarity & maintainability | 20% |
      | Evidence & citations | 20% |
      | Git cleanliness | 10% |
-6. `git status --short` must be clean-ish. If there are uncommitted user changes, do not stage them; only the campaign files will be committed by the orchestrator.
+7. Create and switch to branch `devin/compete-{slug}-judge`. Commit `docs/competitions/{slug}/` with message `Start /compete campaign: {topic}`. This branch holds all campaign docs and is separate from the competitors' branches.
 
 ## 2. Spawn the three competitors
 
@@ -63,6 +64,7 @@ CONSTRAINTS: {constraints}
 GOAL: Build the best system for the topic. Friendly but fierce — outperform the other two agents on the rubric, stay professional.
 
 RULES:
+- Start by invoking the repo's delivery-discipline skill (e.g., `.devin/skills/fact-checked-slop-free-delivery/SKILL.md`) and follow it for the whole task. If none exists, follow repo `AGENTS.md`.
 - Work only in the assigned repo. You are on an isolated machine; do not touch the other agents' branches or PRs.
 - FULL RESEARCH CARTE BLANCHE: use every Devin tool, every MCP server, and any source on the open web to research and read the repo. You may read any file.
 - MODIFICATIONS respect repo `AGENTS.md`, `NEVER TOUCH` values, and protected paths. Do not directly edit protected files (e.g., runtime game files, `.env`, secrets); route changes through the repo's approved builders/ship tools.
@@ -75,7 +77,8 @@ RULES:
   * Never force push, never commit to `main`/`master`, never touch secrets
 - Do not modify `docs/competitions/{slug}/` or the other agents' branches/PRs.
 - Stop when timebox expires or a PR is ready — whichever comes first.
-- Return: PR URL, branch name, summary, self-score against the rubric, and the exact gate commands you ran with exit codes.
+- Finish with the repo's finish-first stop: run all validators, then report `PASS`/`FAIL`/`UNVERIFIED` and stop.
+- Return: PR URL, branch name, summary, self-score against the rubric, finish-first status (`PASS`/`FAIL`/`UNVERIFIED`), and the exact gate commands you ran with exit codes.
 ```
 
 Record session IDs and branch names in `docs/competitions/{slug}/COMPETITORS.md`.
@@ -89,7 +92,7 @@ Record session IDs and branch names in `docs/competitions/{slug}/COMPETITORS.md`
 ## 4. Gather submissions
 
 1. `devin_session_interact` → `get_messages` and `get_attachments` for each child.
-2. `ROUNDUP.md` with PR URL, branch, files changed, summary, self-score, gate results.
+2. `ROUNDUP.md` with PR URL, branch, files changed, summary, self-score, finish-first status, gate results.
 3. For each PR, check out the branch locally and run the repo's lint/test/build gates. Record exit codes.
 
 ## 5. Judging
@@ -103,10 +106,10 @@ Write `docs/competitions/{slug}/JUDGE.md`:
 
 ## 6. Final report and verification
 
-Run the repo gates on each competitor branch and on the synthesis branch (if any). Record every command and exit code.
+Run the repo gates on each competitor branch, the campaign-docs branch, and the synthesis branch (if any). Record every command and exit code.
 
 Return to user:
-- Three PR links and the synthesis PR link (if any).
+- Three PR links, the campaign-docs branch link, and the synthesis PR link (if any).
 - Gate results per branch.
 - Winner and why.
 - One-paragraph critique per entry.
