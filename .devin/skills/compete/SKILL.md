@@ -43,8 +43,8 @@ scope: workspace
 
 Use `devin_mcp` → `devin_session_create` with `devin_mode="lite"` (or `run_subagent` with `model="swe-1-7"` if available). Launch in parallel.
 
-| Agent | Persona | Edge |
-|---|---|---|
+| Agent | Edge |
+|---|---|
 | **A — Speed Demon** | Fastest working system, throughput/latency first, pragmatic cuts. |
 | **B — Safety Sage** | Bulletproof correctness, edge cases, invariants, tests, no regressions. |
 | **C — Elegance Architect** | Cleanest design, minimal code, readable architecture, future-proof. |
@@ -62,7 +62,7 @@ GOAL: Build the best system for the topic. Friendly but fierce — outperform th
 
 RULES:
 - Work only in the assigned repo.
-- FULL CARTE BLANCHE: use every Devin tool, every MCP server, every file in the repo, and any source on the open web.
+- FULL CARTE BLANCHE: use every Devin tool, every MCP server, every file in the repo, and any source on the open web — but stop before any repo `AGENTS.md` `NEVER TOUCH` value or safety rule.
 - Cite evidence for every design choice and every factual claim.
 - WORK CLEAN ON GIT:
   * Branch: `devin/compete-{slug}-{agent}`
@@ -75,7 +75,7 @@ RULES:
 - Return: PR URL, summary, and self-score against the rubric.
 ```
 
-Record session IDs and branch names in `docs/competitions/{slug}/AGENTS.md`.
+Record session IDs and branch names in `docs/competitions/{slug}/COMPETITORS.md`.
 
 ## 3. Cook
 
